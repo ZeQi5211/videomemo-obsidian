@@ -356,3 +356,10 @@ ffmpg*/
 
 # Trellis per-developer workspace
 .trellis/workspace/
+
+# ===== 本地增强版：模型缓存 / 数据库衍生文件 / 自测输出（不应提交）=====
+/models_cache/
+*.db-shm
+*.db-wal
+*.bak-rename
+/backend/_test_out.txt

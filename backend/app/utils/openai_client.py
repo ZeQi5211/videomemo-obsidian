@@ -41,8 +41,12 @@ def build_openai_client(
     # 应用代理仍由 ProxyConfigManager 统一读取并显式注入。
     import httpx
 
+    # 超时默认 1800s（30 分钟）：笔记生成可能输出 5000+ 字（如勾选
+    # 「原文内容略精简易读版」），DeepSeek 等模型生成较慢，600s 会误超时
+    # 并触发 SDK 重试（重试等于重新生成一遍，反而更慢）。
+    # OpenAI SDK 的 max_retries=1：避免长输出在超时后反复从头生成。
     http_client_kwargs = {
-        "timeout": timeout or 600.0,
+        "timeout": timeout or 1800.0,
         "trust_env": False,
     }
     proxy_url = ProxyConfigManager().get_proxy_url()
@@ -51,5 +55,6 @@ def build_openai_client(
         logger.info(f"OpenAI 客户端走代理: {proxy_url}")
 
     kwargs["http_client"] = httpx.Client(**http_client_kwargs)
+    kwargs["max_retries"] = 1
 
     return OpenAI(**kwargs)

@@ -34,7 +34,14 @@ from app.services.provider import ProviderService
 from app.transcriber.base import Transcriber
 from app.transcriber.transcriber_provider import get_transcriber, _transcribers
 from app.utils.cover_helper import localize_cover
-from app.utils.note_helper import replace_content_markers, prepend_source_link, normalize_toc
+from app.utils.note_helper import (
+    replace_content_markers,
+    prepend_source_link,
+    normalize_toc,
+    normalize_frontmatter_tags,
+    extract_author_from_raw_info,
+    inject_auto_tags,
+)
 from app.utils.path_helper import get_runtime_dir
 from app.utils.screenshot_marker import (
     ensure_screenshot_markers,
@@ -186,6 +193,9 @@ class NoteGenerator:
         video_understanding: bool = False,
         video_interval: int = 0,
         grid_size: Optional[List[int]] = None,
+        download_mode: str = "cookie",
+        video_quality: str = "audio",
+        engine_choice: str = "ytdlp",
     ) -> NoteResult | None:
         """
         主流程：按步骤依次下载、转写、GPT 总结、截图/链接处理、存库、返回 NoteResult。
@@ -216,7 +226,7 @@ class NoteGenerator:
 
             # 获取下载器与 GPT 实例
 
-            downloader = self._get_downloader(platform)
+            downloader = self._get_downloader(platform, download_mode, video_quality, engine_choice)
             gpt = self._get_gpt(model_name, provider_id)
 
             # 缓存文件路径
@@ -349,6 +359,14 @@ class NoteGenerator:
 
             # 目录区块确定性整形：LLM 偶尔把 ## 标记抄进目录条目 / 生成嵌套子项
             markdown = normalize_toc(markdown)
+            # frontmatter tags 标点兜底：LLM 可能把数组分隔符写成中文逗号/顿号，
+            # 会导致 Obsidian 把整个 tags 数组解析成单个字符串标签（层级标签失效）
+            markdown = normalize_frontmatter_tags(markdown)
+            # 程序自动标签：平台/作者（从下载元信息提取，不走模型，零错误）
+            author = extract_author_from_raw_info(
+                getattr(audio_meta, "raw_info", None), platform
+            )
+            markdown = inject_auto_tags(markdown, platform=platform, author=author)
             markdown = prepend_source_link(markdown, str(video_url))
 
             # 5. 保存记录到数据库
@@ -442,13 +460,30 @@ class NoteGenerator:
         )
         return GPTFactory().from_config(config)
 
-    def _get_downloader(self, platform: str) -> Downloader:
+    def _get_downloader(self, platform: str, download_mode: str = "cookie",
+                        video_quality: str = "audio", engine_choice: str = "ytdlp") -> Downloader:
         """
-        根据平台名称获取对应的下载器实例
+        根据平台名称与下载模式获取对应的下载器实例
 
         :param platform: 平台标识，需在 SUPPORT_PLATFORM_MAP 中
+        :param download_mode: cookie=原平台下载器（默认）；engine=双引擎下载（yt-dlp+lux）；local=本地视频
+        :param video_quality: engine 模式下下载视频的清晰度（audio/best/1080p/720p/480p/360p）
+        :param engine_choice: engine 模式选择走哪条引擎通道（ytdlp/lux）
         :return: 对应的 Downloader 子类实例
         """
+        if download_mode == "engine":
+            from app.downloaders.smart_downloader import SmartDownloader
+            logger.info(f"使用双引擎下载器（engine 模式, platform={platform}, quality={video_quality}, channel={engine_choice}）")
+            return SmartDownloader(platform=platform, video_quality=video_quality,
+                                   engine_choice=engine_choice)
+
+        if download_mode == "wxchannels":
+            # 微信视频号下载：文件已由 wx_video_download 落在本地下载目录，
+            # 直接把本地文件当「本地视频」处理（转 mp3 → 转写 → 生成笔记）。
+            from app.downloaders.local_downloader import LocalDownloader
+            logger.info("使用微信视频号下载模式（本地已下载文件 → 转写）")
+            return LocalDownloader()
+
         downloader_cls = SUPPORT_PLATFORM_MAP.get(platform)
         logger.debug(f"实例化下载器 -  {platform}")
         instance = None
@@ -499,6 +534,7 @@ class NoteGenerator:
         message: Optional[str] = None,
         paused: bool = False,
         cache: Optional[str] = None,
+        progress: Optional[dict] = None,
     ):
         """
         创建或更新 {task_id}.status.json，记录当前任务状态
@@ -508,6 +544,7 @@ class NoteGenerator:
         :param message: 可选消息，用于记录失败原因等
         :param paused: 是否处于暂停态（保留当前步骤，仅标记暂停）
         :param cache: 可选缓存命中标记，如 transcript/platform_subtitle
+        :param progress: 可选生成进度，如 {"received_chars": 1234, "phase": "summarize"}
         """
         if not task_id:
             return
@@ -518,11 +555,37 @@ class NoteGenerator:
             data["message"] = message
         if cache:
             data["cache"] = cache
+        if progress:
+            data["progress"] = progress
 
         try:
             set_status(task_id, data)
         except Exception as e:
             logger.error(f"写入任务状态失败 (task_id={task_id})：{e}")
+
+    def _make_progress_cb(self, task_id: str):
+        """构造 LLM 生成进度回调：节流后写入任务状态，供前端显示「API 生成中 · 已生成 N 字」。
+
+        流式 chunk 很小且频率高（可能每秒几十次），不能每块都写 DB：
+        距离上次写入 >=1.5s 且累计新增 >=200 字时才写一次。
+        """
+        holder = {"last": 0.0, "chars": 0}
+
+        def cb(delta: str, phase: str):
+            try:
+                holder["chars"] += len(delta or "")
+                now = time.time()
+                if now - holder["last"] >= 1.5 and holder["chars"] >= 200:
+                    holder["last"] = now
+                    self._update_status(
+                        task_id,
+                        TaskStatus.SUMMARIZING,
+                        progress={"received_chars": holder["chars"], "phase": phase},
+                    )
+            except Exception:
+                pass
+
+        return cb
 
     def _handle_exception(self, task_id, exc):
         logger.error(f"任务异常 (task_id={task_id})", exc_info=True)
@@ -925,10 +988,13 @@ class NoteGenerator:
             # 用独立 checkpoint_key 避免和原始生成共用 prompt 缓存
             checkpoint_key=f"{task_id}_repolish_{int(time.time())}",
         )
-        markdown = gpt.summarize(source)
+        markdown = gpt.summarize(source, progress_callback=self._make_progress_cb(task_id))
         logger.info(f"repolish 完成 task_id={task_id} style={style}")
-        # 润色版同样做目录区块整形
-        return normalize_toc(markdown)
+        # 润色版同样做目录区块整形 + frontmatter tags 标点兜底 + 程序自动标签
+        markdown = normalize_frontmatter_tags(normalize_toc(markdown))
+        platform = audio_meta_d.get("platform") or ""
+        author = extract_author_from_raw_info(audio_meta_d.get("raw_info") or {}, platform)
+        return inject_auto_tags(markdown, platform=platform, author=author)
 
     def _summarize_text(
         self,
@@ -979,7 +1045,7 @@ class NoteGenerator:
         )
 
         try:
-            markdown = gpt.summarize(source)
+            markdown = gpt.summarize(source, progress_callback=self._make_progress_cb(task_id))
             markdown_cache_file.write_text(markdown, encoding="utf-8")
             logger.info(f"GPT 总结并缓存成功 ({markdown_cache_file})")
             return markdown

@@ -12,5 +12,6 @@ SUPPORT_PLATFORM_MAP = {
     'kuaishou':KuaiShouDownloader(),
     'douyin':DouyinDownloader(),
     'xiaohongshu':XiaohongshuDownloader(),
-    'local':LocalDownloader()
+    'local':LocalDownloader(),
+    'wxchannels':LocalDownloader()
 }

@@ -57,6 +57,12 @@ class VideoRequest(BaseModel):
     # 跳过 download_subtitles 和音频转写。形如：
     #   {"language": "zh", "full_text": "...", "segments": [{"start","end","text"}, ...]}
     prefetched_transcript: Optional[dict] = None
+    # 下载模式：cookie=原平台下载器（默认）；engine=双引擎下载（yt-dlp+lux）；local=本地视频
+    download_mode: Optional[str] = "cookie"
+    # engine 模式下载视频的清晰度：audio/best/1080p/720p/480p/360p
+    video_quality: Optional[str] = "audio"
+    # engine 模式选择走哪条引擎通道：ytdlp（默认）/ lux
+    engine_choice: Optional[str] = "ytdlp"
 
     @field_validator("video_url")
     def validate_supported_url(cls, v):
@@ -117,7 +123,8 @@ def _persist_prefetched_transcript(task_id: str, transcript: dict) -> None:
 def run_note_task(task_id: str, video_url: str, platform: str, quality: DownloadQuality,
                   link: bool = False, screenshot: bool = False, model_name: str = None, provider_id: str = None,
                   _format: list = None, style: str = None, extras: str = None, video_understanding: bool = False,
-                  video_interval=0, grid_size=[]
+                  video_interval=0, grid_size=[], download_mode: str = "cookie", video_quality: str = "audio",
+                  engine_choice: str = "ytdlp"
                   ):
 
     if not model_name or not provider_id:
@@ -139,6 +146,9 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
             video_understanding=video_understanding,
             video_interval=video_interval,
             grid_size=grid_size,
+            download_mode=download_mode,
+            video_quality=video_quality,
+            engine_choice=engine_choice,
         )
 
     logger.info(f"任务进入执行队列 (task_id={task_id})")
@@ -522,6 +532,9 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
                     "video_understanding": data.video_understanding,
                     "video_interval": data.video_interval,
                     "grid_size": data.grid_size,
+                    "download_mode": data.download_mode,
+                    "video_quality": data.video_quality,
+                    "engine_choice": data.engine_choice,
                 },
             )
             NoteGenerator()._update_status(task_id, TaskStatus.DOWNLOADING, message="等待本地下载器获取…")
@@ -530,7 +543,8 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
 
         background_tasks.add_task(run_note_task, task_id, data.video_url, data.platform, data.quality, data.link,
                                   data.screenshot, data.model_name, data.provider_id, data.format, data.style,
-                                  data.extras, data.video_understanding, data.video_interval, data.grid_size)
+                                  data.extras, data.video_understanding, data.video_interval, data.grid_size,
+                                  data.download_mode, data.video_quality, data.engine_choice)
         return R.success({"task_id": task_id})
     except Exception as e:
         # 用业务错误格式返回（而不是 HTTPException 500）：
@@ -581,6 +595,7 @@ def get_task_status(task_id: str):
             "message": message,
             "paused": paused,
             "cache": cache,
+            "progress": status_content.get("progress"),
             "task_id": task_id
         })
 

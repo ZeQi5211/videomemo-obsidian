@@ -30,7 +30,7 @@ from app.exceptions.exception_handlers import register_exception_handlers
 # from app.db.model_dao import init_model_table
 # from app.db.provider_dao import init_provider_table
 from app.utils.logger import get_logger
-from app.utils.path_helper import get_runtime_dir
+from app.utils.path_helper import get_runtime_dir, get_data_dir
 from app import create_app
 from app.services.transcriber_config_manager import TranscriberConfigManager
 from app.services.scheduler import get_scheduler
@@ -113,6 +113,12 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 register_exception_handlers(app)
 app.mount(static_path, StaticFiles(directory=static_dir), name="static")
 app.mount("/uploads", StaticFiles(directory=uploads_dir), name="uploads")
+
+# 中间产物静态目录：指向 data 根目录（含 data/、output_frames/、grid_output/），
+# 供工作台「中间产物资产管理」模块预览音频/视频/抽帧/网格图。
+# 注意：原片截图已由 /static/screenshots 提供，不在此目录。
+_media_dir = str(Path(get_data_dir()).parent)
+app.mount("/media", StaticFiles(directory=_media_dir), name="media")
 
 
 

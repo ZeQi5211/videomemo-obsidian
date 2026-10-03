@@ -166,16 +166,18 @@ class ModelService:
                 )
             model = saved_models[0]["model_name"]
 
-        ok = OpenAICompatibleProvider.test_connection(
+        ok, err_detail = OpenAICompatibleProvider.test_connection(
             api_key=provider.get('api_key'),
             base_url=provider.get('base_url'),
             model=model,
         )
         if ok:
             return True
+        # 把供应商返回的真实原因（如 402 余额不足 / 401 key 无效）透传给前端，
+        # 不再笼统提示「API / API 地址不正确」
         raise ProviderError(
             code=ProviderErrorEnum.WRONG_PARAMETER.code,
-            message=ProviderErrorEnum.WRONG_PARAMETER.message,
+            message=err_detail or ProviderErrorEnum.WRONG_PARAMETER.message,
         )
 
 

@@ -100,6 +100,180 @@ def sync_cookie_from_browser(data: BrowserCookieSyncRequest):
         return R.error(msg=str(exc))
 
 
+# ---- 下载模式：双引擎（yt-dlp + lux，融合 VideoDownloader）配置 ----
+
+class EngineDirRequest(BaseModel):
+    engine_dir: str
+
+
+class EngineInstallRequest(BaseModel):
+    engine: str  # 'lux' | 'ytdlp'
+
+
+@router.get("/download_mode_config")
+def get_download_mode_config():
+    from app.services.engine_config_manager import EngineConfigManager
+    return R.success(data=EngineConfigManager().detect())
+
+
+@router.post("/download_mode_config")
+def update_download_mode_config(data: EngineDirRequest):
+    from app.services.engine_config_manager import EngineConfigManager
+    return R.success(data=EngineConfigManager().set_engine_dir(data.engine_dir))
+
+
+# 引擎下载定义：官方 Release 地址 + 落盘文件名 + 是否 zip 压缩包
+# lux 官方资产是 zip（lux_0.24.1_Windows_x86_64.zip，解压出 lux.exe），
+# 裸 lux.exe 的地址会 404；yt-dlp 资产即 yt-dlp.exe 本体。
+_ENGINE_DOWNLOADS = {
+    "ytdlp": {
+        "url": "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe",
+        "filename": "yt-dlp.exe",
+        "unzip": False,
+    },
+    "lux": {
+        "url": "https://github.com/iawia002/lux/releases/download/v0.24.1/lux_0.24.1_Windows_x86_64.zip",
+        "filename": "lux.exe",
+        "unzip": True,
+    },
+}
+# GitHub 加速镜像前缀：直连失败时按序切换，直到下载成功（发布给外部用户使用，需尽量保证可用）
+_GITHUB_MIRROR_PREFIXES = [
+    "",                        # 0. 官方直连
+    "https://ghfast.top/",     # 1. ghfast 加速
+    "https://gh-proxy.com/",   # 2. gh-proxy 加速
+    "https://ghproxy.net/",    # 3. ghproxy 加速
+    "https://gh.ddlc.top/",    # 4. ddlc 加速
+    "https://github.moeyy.xyz/",  # 5. moeyy 加速
+]
+# lux.exe / yt-dlp.exe 的最小合理大小（低于此值视为镜像返回了错误页/占位内容）
+_ENGINE_MIN_BYTES = 1024 * 1024
+
+
+def _resolve_proxy_candidates() -> list:
+    """收集可用的下载代理候选（去重，None 表示直连）。
+
+    优先级：VideoMemo 设置的代理 > Windows 系统代理 > 直连。
+    requests 默认不读 Windows 注册表代理，这里显式读取，
+    使开着 Clash / V2Ray 等代理软件的用户也能直接下载成功。
+    """
+    candidates = []
+    # 1. VideoMemo 设置页配置的代理
+    try:
+        from app.services.proxy_config_manager import ProxyConfigManager
+        p = ProxyConfigManager().get_proxy_url()
+        if p:
+            candidates.append(p)
+    except Exception:
+        pass
+    # 2. Windows 系统代理（注册表）
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+        )
+        try:
+            enable, _ = winreg.QueryValueEx(key, "ProxyEnable")
+            server, _ = winreg.QueryValueEx(key, "ProxyServer")
+            if enable and server:
+                if not server.startswith(("http://", "https://", "socks")):
+                    server = "http://" + server
+                if server not in candidates:
+                    candidates.append(server)
+        finally:
+            winreg.CloseKey(key)
+    except Exception:
+        pass
+    candidates.append(None)  # 3. 直连兜底
+    return candidates
+
+
+def _install_engine_task(engine: str):
+    """后台下载 yt-dlp.exe / lux.exe 到引擎目录。
+
+    多通道自动切换，确保发布给外部用户时尽量一次成功：
+    1. 代理通道：VideoMemo 已配置代理 / Windows 系统代理（Clash 等）
+    2. 下载源通道：GitHub 官方直连失败时，依次尝试各加速镜像
+    每次下载都做文件大小校验，防止镜像返回错误页。
+    """
+    import requests
+    from app.services.engine_config_manager import (
+        EngineConfigManager, _DEFAULT_VD_DIR, _ENGINE_BIN_DIR,
+    )
+    manager = EngineConfigManager()
+    engine_dir = manager.get_engine_dir() or str(_DEFAULT_VD_DIR / _ENGINE_BIN_DIR)
+    os.makedirs(engine_dir, exist_ok=True)
+    info = _ENGINE_DOWNLOADS.get(engine)
+    if not info:
+        return
+    base_url = info["url"]
+    filename = info["filename"]
+    target = os.path.join(engine_dir, filename)
+    if os.path.exists(target) and os.path.getsize(target) >= _ENGINE_MIN_BYTES:
+        logger.info(f"引擎 {filename} 已存在，跳过安装")
+        return
+    tmp = target + ".part"
+    last_err = None
+    proxy_candidates = _resolve_proxy_candidates()
+    for proxy in proxy_candidates:
+        proxies = {"http": proxy, "https": proxy} if proxy else None
+        for prefix in _GITHUB_MIRROR_PREFIXES:
+            url = prefix + base_url
+            try:
+                logger.info(
+                    f"开始安装下载引擎 {filename} <- {url}"
+                    + (f"（代理 {proxy}）" if proxy else "（直连）")
+                )
+                # (连接超时, 读取超时)：单个源最多约 80s，顺序尝试，总时长可控
+                resp = requests.get(
+                    url, stream=True, timeout=(20, 60),
+                    allow_redirects=True, proxies=proxies,
+                )
+                resp.raise_for_status()
+                size = 0
+                with open(tmp, "wb") as f:
+                    for chunk in resp.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                            size += len(chunk)
+                if size < _ENGINE_MIN_BYTES:
+                    raise RuntimeError(f"下载内容过小（{size} bytes），疑似镜像错误页")
+                if info["unzip"]:
+                    # lux 资产是 zip：解压出内部 .exe 落盘为 lux.exe
+                    import zipfile
+                    with zipfile.ZipFile(tmp) as zf:
+                        exe_names = [n for n in zf.namelist() if n.lower().endswith(".exe")]
+                        if not exe_names:
+                            raise RuntimeError("压缩包内未找到 .exe 文件")
+                        with zf.open(exe_names[0]) as src, open(target, "wb") as dst:
+                            import shutil
+                            shutil.copyfileobj(src, dst)
+                    os.remove(tmp)
+                else:
+                    os.replace(tmp, target)
+                logger.info(f"引擎安装完成: {target}（{size} bytes，来源 {url}）")
+                return
+            except Exception as e:
+                last_err = e
+                logger.warning(f"引擎下载源失败 {url}: {e}")
+                try:
+                    if os.path.exists(tmp):
+                        os.remove(tmp)
+                except Exception:
+                    pass
+                continue
+    logger.error(f"所有下载源均失败，引擎 {filename} 未安装（可改用 VideoDownloader 安装后自动复用）: {last_err}")
+
+
+@router.post("/download_mode_install")
+def install_download_engine(data: EngineInstallRequest, background_tasks: BackgroundTasks):
+    if data.engine not in ("lux", "ytdlp"):
+        return R.error(msg="engine 必须是 lux 或 ytdlp")
+    background_tasks.add_task(_install_engine_task, data.engine)
+    return R.success(msg="已开始安装，稍后刷新查看状态")
+
+
 class TranscriberConfigRequest(BaseModel):
     transcriber_type: str
     whisper_model_size: Optional[str] = None
@@ -274,8 +448,18 @@ FUNASR_MODEL_REPOS: dict = {
 
 
 def _modelscope_cache_root() -> Path:
-    """modelscope 默认缓存根（funasr AutoModel 下载落点相同）。"""
-    return Path(os.path.expanduser(os.getenv("MODELSCOPE_CACHE", "~/.cache/modelscope"))) / "hub" / "models"
+    """modelscope 模型实际落盘根（funasr AutoModel 下载落点相同）。
+
+    注意 MODELSCOPE_CACHE 的两种语义：
+    - 显式设置时，modelscope 把该目录直接当作 hub 根，模型落在 {root}/models；
+    - 未设置时，默认 hub 根为 ~/.cache/modelscope/hub，模型同样落在 {root}/models。
+    """
+    env = os.getenv("MODELSCOPE_CACHE")
+    if env:
+        base = Path(os.path.expanduser(env))
+    else:
+        base = Path.home() / ".cache" / "modelscope" / "hub"
+    return base / "models"
 
 
 def _check_funasr_model_exists(name: str) -> bool:

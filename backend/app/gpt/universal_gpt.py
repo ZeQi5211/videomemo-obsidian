@@ -199,23 +199,57 @@ class UniversalGPT(GPT):
             or "only the default" in raw
         )
 
-    def _do_create(self, messages: list):
-        """单次调用。如果模型拒绝自定义 temperature，就地去掉该参数再试一次
-        （不消耗外层的重试次数预算），仍失败则把异常抛给外层重试逻辑。"""
+    def _do_create(self, messages: list, progress_callback=None):
+        """单次调用（流式）。返回生成的文本内容字符串。
+
+        流式（stream=True）逐块接收输出：API 每生成一小段就立刻拿到，
+        progress_callback 每收到一段增量被调用（外部据此上报实时进度，
+        让前端能显示「API 生成中 · 已收到 N 字」）。
+        若模型拒绝自定义 temperature，就地去掉该参数再试一次
+        （不消耗外层的重试次数预算），仍失败则把异常抛给外层重试逻辑。
+        """
         try:
-            return self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=self.temperature,
+            return self._stream_create(
+                messages, temperature=self.temperature, progress_callback=progress_callback
             )
         except Exception as exc:
             if self._is_temperature_unsupported_error(exc):
                 print(f"[universal_gpt] 模型 {self.model} 不支持自定义 temperature，改用默认值重试")
-                return self.client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
+                return self._stream_create(
+                    messages, temperature=None, progress_callback=progress_callback
                 )
             raise
+
+    def _stream_create(self, messages: list, temperature, progress_callback=None) -> str:
+        """流式生成并逐块拼接全文。usage 从流式末尾块收集（供应商未返回时容错跳过）。"""
+        kwargs = {"model": self.model, "messages": messages, "stream": True}
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        stream = self.client.chat.completions.create(**kwargs)
+        parts: list[str] = []
+        for chunk in stream:
+            try:
+                usage = getattr(chunk, "usage", None)
+                if usage:
+                    total = getattr(usage, "total_tokens", None)
+                    if total:
+                        # 流式下 usage 为累计值（最终块是完整用量），覆盖而非累加
+                        self.total_tokens = int(total)
+            except Exception:
+                pass
+            delta = None
+            try:
+                delta = chunk.choices[0].delta.content
+            except Exception:
+                pass
+            if delta:
+                parts.append(delta)
+                if progress_callback:
+                    try:
+                        progress_callback(delta)
+                    except Exception:
+                        pass
+        return "".join(parts)
 
     def _accumulate_usage(self, response) -> None:
         """累加单次响应的 token 用量。部分供应商可能不返回 usage，容错跳过。"""
@@ -227,13 +261,11 @@ class UniversalGPT(GPT):
         except Exception:
             pass
 
-    def _chat_completion_create(self, messages: list):
+    def _chat_completion_create(self, messages: list, progress_callback=None) -> str:
         last_exc = None
         for attempt in range(self._max_retry_attempts):
             try:
-                response = self._do_create(messages)
-                self._accumulate_usage(response)
-                return response
+                return self._do_create(messages, progress_callback=progress_callback)
             except Exception as exc:
                 last_exc = exc
                 if attempt == self._max_retry_attempts - 1 or not self._is_retryable_error(exc):
@@ -245,7 +277,8 @@ class UniversalGPT(GPT):
             raise last_exc
         raise RuntimeError("chat completion failed without exception")
 
-    def _merge_partials(self, partials: list, checkpoint_key: str | None, source_signature: str | None) -> str:
+    def _merge_partials(self, partials: list, checkpoint_key: str | None, source_signature: str | None,
+                        progress_callback=None) -> str:
         def build_messages(texts, *_args, **_kwargs):
             return self._build_merge_messages(texts)
 
@@ -265,13 +298,14 @@ class UniversalGPT(GPT):
             for group_idx, group in enumerate(groups):
                 messages = build_messages(group)
                 try:
-                    response = self._chat_completion_create(messages)
+                    cb = (lambda d, _cb=progress_callback: _cb(d, "merge")) if progress_callback else None
+                    response = self._chat_completion_create(messages, progress_callback=cb)
                 except Exception as exc:
                     if checkpoint_key and source_signature:
                         self._save_checkpoint(checkpoint_key, source_signature, current_partials, "merge")
                     raise
 
-                new_partials.append(strip_think_blocks(response.choices[0].message.content))
+                new_partials.append(strip_think_blocks(response))
 
                 if checkpoint_key and source_signature:
                     remaining_partials = []
@@ -284,7 +318,7 @@ class UniversalGPT(GPT):
 
         return current_partials[0]
 
-    def summarize(self, source: GPTSource) -> str:
+    def summarize(self, source: GPTSource, progress_callback=None) -> str:
         self.total_tokens = 0
         self.screenshot = source.screenshot
         self.link = source.link
@@ -338,13 +372,14 @@ class UniversalGPT(GPT):
                 extras=source.extras
             )
             try:
-                response = self._chat_completion_create(messages)
+                cb = (lambda d, _cb=progress_callback: _cb(d, "summarize")) if progress_callback else None
+                response = self._chat_completion_create(messages, progress_callback=cb)
             except Exception as exc:
                 if checkpoint_key and source_signature:
                     self._save_checkpoint(checkpoint_key, source_signature, partials, "summarize")
                 raise
 
-            partials.append(strip_think_blocks(response.choices[0].message.content))
+            partials.append(strip_think_blocks(response))
             if checkpoint_key and source_signature:
                 self._save_checkpoint(checkpoint_key, source_signature, partials, "summarize")
 
@@ -352,7 +387,7 @@ class UniversalGPT(GPT):
             if checkpoint_key:
                 self._clear_checkpoint(checkpoint_key)
             return partials[0]
-        merged = self._merge_partials(partials, checkpoint_key, source_signature)
+        merged = self._merge_partials(partials, checkpoint_key, source_signature, progress_callback=progress_callback)
         if checkpoint_key:
             self._clear_checkpoint(checkpoint_key)
         return merged

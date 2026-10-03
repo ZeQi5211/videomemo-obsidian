@@ -36,12 +36,12 @@ import {
 } from '@/components/ui/select.tsx'
 import { Input } from '@/components/ui/input.tsx'
 import { Textarea } from '@/components/ui/textarea.tsx'
-import { noteStyles, noteFormats, videoPlatforms } from '@/constant/note.ts'
+import { noteStyles, noteFormats, videoPlatforms, downloadModes, videoQualityOptions } from '@/constant/note.ts'
 import { fetchModels } from '@/services/model.ts'
 import { useNavigate } from 'react-router-dom'
 import toast from 'react-hot-toast'
 import { detectPlatform, getCustomPlatforms, setCustomPlatforms } from '@/utils/platform'
-import { listCustomPlatforms, type CustomPlatform } from '@/services/downloader'
+import { listCustomPlatforms, getDownloadModeConfig, type CustomPlatform } from '@/services/downloader'
 import PlatformLetterAvatar from '@/components/PlatformLetterAvatar'
 
 const douyinUrlInTextPattern =
@@ -65,6 +65,8 @@ const formSchema = z
       .tuple([z.coerce.number().min(1).max(10), z.coerce.number().min(1).max(10)])
       .default([2, 2])
       .optional(),
+    download_mode: z.enum(['cookie', 'engine', 'local']).default('cookie'),
+    video_quality: z.enum(['audio', 'best', '1080p', '720p', '480p', '360p']).default('audio'),
   })
   .superRefine(({ video_url, platform }, ctx) => {
     if (platform === 'local') {
@@ -174,6 +176,8 @@ const NoteForm = ({ onSubmitted }: { onSubmitted?: () => void } = {}) => {
       video_interval: 6,
       grid_size: [2, 2],
       format: [],
+      download_mode: 'cookie',
+      video_quality: 'audio',
     },
   })
   const currentTask = getCurrentTask()
@@ -182,7 +186,9 @@ const NoteForm = ({ onSubmitted }: { onSubmitted?: () => void } = {}) => {
   const platform = useWatch({ control: form.control, name: 'platform' }) as string
   const videoUrl = useWatch({ control: form.control, name: 'video_url' }) as string | undefined
   const videoUnderstandingEnabled = useWatch({ control: form.control, name: 'video_understanding' })
+  const downloadMode = useWatch({ control: form.control, name: 'download_mode' }) as string
   const editing = currentTask && currentTask.id
+  const [engineConfig, setEngineConfig] = useState<Awaited<ReturnType<typeof getDownloadModeConfig>> | null>(null)
 
   // URL → 平台自动匹配：粘贴/输入链接后，把平台下拉切到对应项，
   // 避免「链接是 YouTube、平台仍是抖音」之类的错配走错下载器。
@@ -194,6 +200,21 @@ const NoteForm = ({ onSubmitted }: { onSubmitted?: () => void } = {}) => {
       form.setValue('platform', detected, { shouldValidate: true })
     }
   }, [videoUrl, platform, form])
+
+  // 本地视频模式：强制平台为 local（避免与链接模式混用）
+  useEffect(() => {
+    if (downloadMode === 'local' && platform !== 'local') {
+      form.setValue('platform', 'local', { shouldValidate: true })
+    }
+  }, [downloadMode, platform, form])
+
+  // 双引擎模式：拉取引擎就绪状态（lux / yt-dlp）
+  useEffect(() => {
+    if (downloadMode !== 'engine') return
+    getDownloadModeConfig()
+      .then(setEngineConfig)
+      .catch(() => setEngineConfig(null))
+  }, [downloadMode])
 
   const goModelAdd = () => {
     navigate("/settings/model");
@@ -223,6 +244,8 @@ const NoteForm = ({ onSubmitted }: { onSubmitted?: () => void } = {}) => {
       video_interval: formData.video_interval ?? 6,
       grid_size: formData.grid_size ?? [2, 2],
       format: formData.format ?? [],
+      download_mode: formData.download_mode ?? 'cookie',
+      video_quality: formData.video_quality ?? 'audio',
     })
   }, [
     // 当下面任意一个变了，就重新 reset
@@ -336,11 +359,64 @@ const NoteForm = ({ onSubmitted }: { onSubmitted?: () => void } = {}) => {
           {/* 顶部按钮 */}
           <FormButton></FormButton>
 
+          {/* 下载模式：智能 Cookie / 双引擎 / 本地视频 */}
+          <SectionHeader title="下载模式" tip="选择视频的获取方式：站点 Cookie 下载、yt-dlp+lux 双引擎、或本地视频直接转写" />
+          <FormField
+            control={form.control}
+            name="download_mode"
+            render={({ field }) => (
+              <FormItem>
+                <div className="grid grid-cols-3 gap-2">
+                  {downloadModes.map(m => (
+                    <button
+                      type="button"
+                      key={m.value}
+                      onClick={() => form.setValue('download_mode', m.value as NoteFormValues['download_mode'], { shouldValidate: true })}
+                      className={
+                        'rounded-md border p-2.5 text-left transition-colors ' +
+                        (field.value === m.value
+                          ? 'border-primary bg-primary/5 ring-1 ring-primary/30'
+                          : 'border-neutral-200 hover:border-neutral-300 hover:bg-neutral-50')
+                      }
+                    >
+                      <div className={'text-sm font-medium ' + (field.value === m.value ? 'text-primary' : '')}>
+                        {m.label}
+                      </div>
+                      <div className="mt-0.5 text-[11px] leading-snug text-gray-500">{m.desc}</div>
+                    </button>
+                  ))}
+                </div>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          {/* 双引擎模式：引擎状态 */}
+          {downloadMode === 'engine' && (
+            <div className="rounded-md border border-amber-100 bg-amber-50 p-2 text-xs leading-relaxed text-amber-700">
+              引擎状态：lux{' '}
+              {engineConfig?.lux_installed ? (
+                <b className="text-emerald-600">✓ 已就绪</b>
+              ) : (
+                <span className="text-amber-600">未安装（B站/抖音等国内站将自动回退 yt-dlp）</span>
+              )}{' '}
+              · yt-dlp{' '}
+              {engineConfig?.ytdlp_exe_installed ? (
+                <b className="text-emerald-600">✓ 已就绪</b>
+              ) : (
+                <span className="text-amber-600">使用内置 Python 版</span>
+              )}
+              {engineConfig?.engine_dir && (
+                <span className="block text-gray-500">引擎目录：{engineConfig.engine_dir}</span>
+              )}
+            </div>
+          )}
+
           {/* 视频链接 & 平台 */}
           <SectionHeader title="视频链接" tip="支持 B 站、YouTube 等平台" />
           <div className="flex gap-2">
-            {/* 平台选择 */}
-
+            {/* 平台选择：仅智能 Cookie 模式需要（双引擎按 URL 域名路由引擎；本地视频由系统锁定） */}
+            {downloadMode === 'cookie' && (
             <FormField
               control={form.control}
               name="platform"
@@ -358,7 +434,7 @@ const NoteForm = ({ onSubmitted }: { onSubmitted?: () => void } = {}) => {
                       </SelectTrigger>
                     </FormControl>
                     <SelectContent>
-                      {videoPlatforms?.map(p => (
+                      {videoPlatforms?.filter(p => p.value !== 'local').map(p => (
                         <SelectItem key={p.value} value={p.value}>
                           <div className="flex items-center justify-center gap-2">
                             <div className="h-4 w-4">{p.logo()}</div>
@@ -380,6 +456,7 @@ const NoteForm = ({ onSubmitted }: { onSubmitted?: () => void } = {}) => {
                 </FormItem>
               )}
             />
+            )}
             {/* 链接输入 / 上传框 */}
             <FormField
               control={form.control}
@@ -388,7 +465,7 @@ const NoteForm = ({ onSubmitted }: { onSubmitted?: () => void } = {}) => {
                 <FormItem className="flex-1">
                   {platform === 'local' ? (
                     <>
-                      <Input disabled={!!editing} placeholder="请输入本地视频路径" {...field} />
+                      <Input disabled={!!editing} placeholder="已选择本地视频，或点击下方区域选择" {...field} readOnly />
                     </>
                   ) : (
                     <Input disabled={!!editing} placeholder="请输入视频网站链接" {...field} />
@@ -397,6 +474,32 @@ const NoteForm = ({ onSubmitted }: { onSubmitted?: () => void } = {}) => {
                 </FormItem>
               )}
             />
+            {/* 双引擎模式：视频清晰度 */}
+            {downloadMode === 'engine' && (
+              <FormField
+                control={form.control}
+                name="video_quality"
+                render={({ field }) => (
+                  <FormItem>
+                    <Select value={field.value} onValueChange={field.onChange} defaultValue={field.value}>
+                      <FormControl>
+                        <SelectTrigger className="w-32">
+                          <SelectValue />
+                        </SelectTrigger>
+                      </FormControl>
+                      <SelectContent>
+                        {videoQualityOptions.map(q => (
+                          <SelectItem key={q.value} value={q.value}>
+                            {q.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <FormMessage style={{ display: 'none' }} />
+                  </FormItem>
+                )}
+              />
+            )}
           </div>
 
           <FormField

@@ -1,5 +1,6 @@
 import request from '@/utils/request'
 import toast from 'react-hot-toast'
+import { normalizeMarkdownForObsidianExport } from '@/services/obsidian'
 
 export const generateNote = async (data: {
   video_url: string
@@ -14,6 +15,8 @@ export const generateNote = async (data: {
   video_understand?: boolean
   video_interval?: number
   grid_size: Array<number>
+  download_mode?: string
+  video_quality?: string
 }) => {
   try {
     console.log('generateNote', data)
@@ -145,7 +148,10 @@ export const exportNote = async (
 ): Promise<void> => {
   // 客户端直出 markdown：原本 Header 的「下载 Markdown」逻辑保持零网络
   if (format === 'markdown' && opts?.clientContent !== undefined) {
-    const blob = new Blob([opts.clientContent], { type: 'text/markdown;charset=utf-8' })
+    // 旧笔记的来源链接可能在文件开头，会挤占 frontmatter 第一行导致 Obsidian 不识别；
+    // 下载前做一次 Obsidian 兼容归一化（仅影响下载文件，不影响界面显示）
+    const normalized = normalizeMarkdownForObsidianExport(opts.clientContent)
+    const blob = new Blob([normalized], { type: 'text/markdown;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url

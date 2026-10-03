@@ -6,6 +6,7 @@ import {
   Activity,
   KeyRound,
   Send,
+  BookMarked,
 } from 'lucide-react'
 import MenuBar, { IMenuProps } from '@/pages/SettingPage/components/menuBar.tsx'
 
@@ -34,6 +35,12 @@ const Menu = () => {
       name: '飞书推送',
       icon: <Send />,
       path: '/settings/feishu',
+    },
+    {
+      id: 'obsidian',
+      name: 'Obsidian 同步',
+      icon: <BookMarked />,
+      path: '/settings/obsidian',
     },
     {
       id: 'access-password',

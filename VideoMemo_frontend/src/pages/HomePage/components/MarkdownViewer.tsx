@@ -16,6 +16,7 @@ import {
   Sparkles,
   ListTree,
   ChevronLeft,
+  BookMarked,
 } from 'lucide-react'
 import { GenHero, Spinner } from '@/components/design/animations'
 import {
@@ -28,6 +29,13 @@ import {
   type NoteVersion,
 } from '@/services/note.ts'
 import { pushNoteToFeishu } from '@/services/feishu.ts'
+import {
+  getObsidianConfig,
+  saveObsidianConfig,
+  testObsidianPath,
+  syncNoteToObsidian,
+  type ObsidianSyncInfo,
+} from '@/services/obsidian.ts'
 import MDEditor from '@uiw/react-md-editor'
 import {
   Dialog,
@@ -61,6 +69,7 @@ import 'katex/dist/katex.min.css'
 import 'github-markdown-css/github-markdown-light.css'
 import { useTaskStore } from '@/store/taskStore'
 import { buildVideoTimestampUrl } from '@/utils/platform'
+import { DRAFT_KEY } from '@/pages/HomePage/NewNoteRedesigned.tsx'
 import { noteStyles } from '@/constant/note.ts'
 import { MarkdownHeader } from '@/pages/HomePage/components/MarkdownHeader.tsx'
 import TranscriptViewer from '@/pages/HomePage/components/transcriptViewer.tsx'
@@ -449,6 +458,13 @@ function createMarkdownComponents(
 const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   const [copied, setCopied] = useState(false)
   const [feishuPushing, setFeishuPushing] = useState(false)
+  // ── 同步到 Obsidian ───────────────────────────────────────
+  const [obsidianSyncing, setObsidianSyncing] = useState(false)
+  const [obsidianLastInfo, setObsidianLastInfo] = useState<ObsidianSyncInfo | null>(null)
+  const [obsidianDialogOpen, setObsidianDialogOpen] = useState(false)
+  const [obsidianFolderPath, setObsidianFolderPath] = useState('')
+  const [obsidianTesting, setObsidianTesting] = useState(false)
+  const [obsidianTestMsg, setObsidianTestMsg] = useState<{ ok: boolean; text: string } | null>(null)
   const [currentVerId, setCurrentVerId] = useState<string>('')
   const [selectedContent, setSelectedContent] = useState<string>('')
   const [modelName, setModelName] = useState<string>('')
@@ -464,6 +480,39 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   const cacheHint = getCacheHint((currentTask as any)?.cache)
   const retryTask = useTaskStore.getState().retryTask
   const updateTaskContent = useTaskStore(state => state.updateTaskContent)
+  const setCurrentTask = useTaskStore(state => state.setCurrentTask)
+
+  // 失败任务「返回修改」：把任务的提交参数写回新建笔记草稿（DRAFT_KEY），
+  // 回到表单后链接/模型/风格/视频理解等全部带出，改完可重新提交。
+  const handleBackToEdit = () => {
+    const fd: any = currentTask?.formData
+    if (fd) {
+      try {
+        localStorage.setItem(
+          DRAFT_KEY,
+          JSON.stringify({
+            url: fd.video_url || '',
+            platform: fd.platform || 'bilibili',
+            downloadMode: fd.download_mode || (fd.platform === 'local' ? 'local' : 'cookie'),
+            engineChoice: fd.engine_choice || 'ytdlp',
+            videoQuality: fd.video_quality || 'audio',
+            modelName: fd.model_name || '',
+            style: fd.style || 'minimal',
+            quality: fd.quality || 'medium',
+            formats: Array.isArray(fd.format) ? fd.format : ['toc', 'screenshot', 'summary'],
+            vision: !!fd.video_understanding,
+            intervalSec: fd.video_interval ?? 30,
+            cols: Array.isArray(fd.grid_size) ? fd.grid_size[0] : 2,
+            rows: Array.isArray(fd.grid_size) ? fd.grid_size[1] : 2,
+            extras: fd.extras || '',
+          })
+        )
+      } catch {
+        /* localStorage 不可用时忽略，表单仍会打开 */
+      }
+    }
+    setCurrentTask(null)
+  }
 
   // 暂停 / 继续控制
   const summarizeIndex = steps.findIndex(s => s.key === 'SUMMARIZING')
@@ -716,6 +765,83 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
       setFeishuPushing(false)
     }
   }
+
+  // ── 同步到 Obsidian ───────────────────────────────────────
+  const doObsidianSync = async () => {
+    const task = getCurrentTask()
+    if (!task || obsidianSyncing) return
+    setObsidianSyncing(true)
+    const toastId = toast.loading('正在同步到 Obsidian…')
+    try {
+      const info = await syncNoteToObsidian({
+        taskId: task.id,
+        versionId: currentVerId || undefined,
+        sourceUrl: videoUrl || undefined,
+      })
+      setObsidianLastInfo(info)
+      toast.success(`已同步：${info.filename}`, { id: toastId })
+    } catch (e: any) {
+      toast.error(
+        e?.msg || e?.message || '同步失败，请检查「设置 → Obsidian 同步」中的文件夹路径',
+        { id: toastId }
+      )
+    } finally {
+      setObsidianSyncing(false)
+    }
+  }
+
+  const handleSyncObsidian = async () => {
+    const task = getCurrentTask()
+    if (!task || obsidianSyncing) return
+    try {
+      const cfg = await getObsidianConfig()
+      if (!cfg?.folder_path) {
+        // 首次使用：弹窗引导填写自己的 Obsidian 文件夹路径
+        setObsidianFolderPath('')
+        setObsidianTestMsg(null)
+        setObsidianDialogOpen(true)
+        return
+      }
+      await doObsidianSync()
+    } catch (e: any) {
+      toast.error(e?.msg || e?.message || '读取 Obsidian 配置失败')
+    }
+  }
+
+  const handleObsidianTest = async () => {
+    if (!obsidianFolderPath.trim()) {
+      toast.error('请先填写文件夹路径')
+      return
+    }
+    setObsidianTesting(true)
+    try {
+      await testObsidianPath(obsidianFolderPath)
+      setObsidianTestMsg({ ok: true, text: '路径有效，可以写入' })
+    } catch (e: any) {
+      // 拦截器已弹后端错误，这里仅记录状态供对话框内展示
+      setObsidianTestMsg({ ok: false, text: e?.msg || '路径不可用' })
+    } finally {
+      setObsidianTesting(false)
+    }
+  }
+
+  const handleObsidianDialogSave = async () => {
+    if (obsidianTesting || obsidianSyncing) return
+    if (!obsidianFolderPath.trim()) {
+      toast.error('请填写 Obsidian 文件夹路径')
+      return
+    }
+    setObsidianTesting(true)
+    try {
+      await saveObsidianConfig(obsidianFolderPath)
+      setObsidianDialogOpen(false)
+      await doObsidianSync()
+    } catch (e: any) {
+      // 保存失败：拦截器已提示，保留对话框让用户修正
+    } finally {
+      setObsidianTesting(false)
+    }
+  }
   const alertButton = {
     id: 'alert',
     title: '测试警告',
@@ -888,6 +1014,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
       { key: 'SUCCESS', zh: '保存完成', icon: <Check size={18} /> },
     ]
     const normalized = taskStatus === 'SAVING' ? 'SUMMARIZING' : taskStatus
+    const progressChars = currentTask?.progress?.received_chars ?? 0
     const idx = Math.max(
       0,
       STEP_DEFS.findIndex(s => s.key === normalized)
@@ -946,6 +1073,21 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                 </div>
               ))}
             </div>
+
+            {/* LLM 流式生成进度：API 正在工作时的实时证据 */}
+            {normalized === 'SUMMARIZING' && (
+              <div
+                className="vm-field-hint"
+                style={{ marginTop: 14, display: 'flex', alignItems: 'center', gap: 8 }}
+              >
+                <Sparkles size={14} style={{ color: 'var(--vm-primary)' }} />
+                <span>
+                  {progressChars > 0
+                    ? `API 生成中 · 已生成 ${progressChars.toLocaleString()} 字`
+                    : '正在连接模型 · 生成内容后此处会实时更新'}
+                </span>
+              </div>
+            )}
           </div>
 
           {/* 暂停 / 继续 控制 */}
@@ -1003,9 +1145,15 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
           <p className="text-lg font-bold text-red-500">笔记生成失败</p>
           <p className="mt-2 mb-2 text-xs text-red-400">请检查后台或稍后再试</p>
 
-          <Button onClick={() => retryTask(currentTask.id)} size="lg">
-            重试
-          </Button>
+          <div className="flex items-center justify-center gap-3">
+            <Button variant="outline" size="lg" onClick={handleBackToEdit}>
+              <ChevronLeft className="mr-1 h-4 w-4" />
+              返回修改
+            </Button>
+            <Button onClick={() => retryTask(currentTask.id)} size="lg">
+              重试
+            </Button>
+          </div>
         </div>
       </div>
     )
@@ -1030,6 +1178,9 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
         onPushFeishu={handlePushFeishu}
         feishuUrl={currentTask?.feishu?.url}
         feishuPushing={feishuPushing}
+        onSyncObsidian={handleSyncObsidian}
+        obsidianSyncing={obsidianSyncing}
+        obsidianLastInfo={obsidianLastInfo}
         createAt={createTime}
         showChat={showChat}
         setShowChat={setShowChat}
@@ -1195,6 +1346,79 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
           )}
         </div>
       )}
+
+      {/* Obsidian 同步配置 Dialog（首次使用 / 未配置路径时引导填写） */}
+      <Dialog
+        open={obsidianDialogOpen}
+        onOpenChange={open => !obsidianTesting && !obsidianSyncing && setObsidianDialogOpen(open)}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>同步到 Obsidian</DialogTitle>
+            <DialogDescription>
+              填写你自己的 Obsidian 知识库文件夹绝对路径（例如
+              D:\ObsidianVault\视频解析知识库）。保存后每次点「同步 Obsidian」都会写入该文件夹，不会覆盖已有文件。
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3 py-2">
+            <div>
+              <label className="mb-1 block text-sm font-medium text-gray-700">
+                Obsidian 文件夹路径
+              </label>
+              <input
+                value={obsidianFolderPath}
+                onChange={e => {
+                  setObsidianFolderPath(e.target.value)
+                  setObsidianTestMsg(null)
+                }}
+                placeholder="例如 D:\ObsidianVault\视频解析知识库"
+                className="w-full rounded-md border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
+                disabled={obsidianTesting}
+              />
+              {obsidianTestMsg && (
+                <p
+                  className={`mt-1.5 text-xs ${
+                    obsidianTestMsg.ok ? 'text-emerald-600' : 'text-red-500'
+                  }`}
+                >
+                  {obsidianTestMsg.text}
+                </p>
+              )}
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={handleObsidianTest}
+              disabled={obsidianTesting || !obsidianFolderPath.trim()}
+            >
+              {obsidianTesting ? (
+                <>
+                  <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                  测试中…
+                </>
+              ) : (
+                '测试路径'
+              )}
+            </Button>
+            <Button onClick={handleObsidianDialogSave} disabled={obsidianTesting || obsidianSyncing}>
+              {obsidianTesting || obsidianSyncing ? (
+                <>
+                  <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                  保存并同步…
+                </>
+              ) : (
+                <>
+                  <BookMarked className="mr-1.5 h-3.5 w-3.5" />
+                  保存并同步
+                </>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* 重新润色 Dialog */}
       <Dialog open={repolishOpen} onOpenChange={open => !repolishing && setRepolishOpen(open)}>

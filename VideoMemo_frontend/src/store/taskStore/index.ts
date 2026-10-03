@@ -55,6 +55,11 @@ export interface Task {
   totalTokens?: number
   paused?: boolean
   cache?: string
+  /** LLM 生成进度（流式）：API 已返回的字数与阶段，用于显示「API 生成中」 */
+  progress?: {
+    received_chars?: number
+    phase?: string
+  }
   createdAt: string
   completedAt?: string // 任务变为 SUCCESS 的时间（由轮询补记）
   // 飞书文档推送结果（手动推送或生成后自动推送写回）

@@ -76,6 +76,7 @@ export const PLATFORMS: Record<string, PlatformBrand> = {
   wechat_mp: { zh: '微信公众号', en: 'WeChat', short: '公', color: '#07C160' },
   generic_web: { zh: '普通网页', en: 'Web', short: 'W', color: '#6366F1' },
   local: { zh: '本地视频', en: 'Local', short: '⬡', color: '#64748B' },
+  wxchannels: { zh: '微信视频号', en: 'WeChat Channels', short: '视', color: '#07C160' },
 }
 
 export const Pf: FC<{ id: string; sm?: boolean }> = ({ id, sm }) => {

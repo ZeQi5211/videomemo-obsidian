@@ -25,6 +25,7 @@ const Trends = lazy(() => import('@/pages/Trends'))
 const Subscriptions = lazy(() => import('@/pages/Subscriptions'))
 const Articles = lazy(() => import('@/pages/Articles'))
 const Guide = lazy(() => import('@/pages/Guide'))
+const Assets = lazy(() => import('@/pages/Assets'))
 
 // 桌面端首启引导守卫：未完成 onboarding 时强制跳到 /onboarding
 function OnboardingGuard({ children }: { children: React.ReactNode }) {
@@ -43,12 +44,13 @@ const Downloader = lazy(() => import('@/pages/SettingPage/Downloader.tsx'))
 const DownloaderForm = lazy(() => import('@/components/Form/DownloaderForm/Form.tsx'))
 const TranscriberPage = lazy(() => import('@/pages/SettingPage/transcriber.tsx'))
 const FeishuPage = lazy(() => import('@/pages/SettingPage/Feishu.tsx'))
+const ObsidianPage = lazy(() => import('@/pages/SettingPage/Obsidian.tsx'))
 const LocalDownloaderPage = lazy(() => import('@/pages/SettingPage/LocalDownloader.tsx'))
 const AccessPassword = lazy(() => import('@/pages/SettingPage/AccessPassword.tsx'))
 const NotFoundPage = lazy(() => import('@/pages/NotFoundPage'))
 
 function App() {
-  useTaskPolling(3000) // 每 3 秒轮询一次
+  useTaskPolling() // 自适应轮询：1~3 个任务 3s / 4~10 个 6s / >10 个 10s
   const { loading, initialized, failed, lastError, retry } = useCheckBackend()
 
   // 在后端初始化完成后执行系统检查
@@ -104,6 +106,9 @@ function App() {
                 <Route path="trends" element={<Trends />} />
                 <Route path="subscriptions" element={<Subscriptions />} />
                 <Route path="articles" element={<Articles />} />
+                <Route path="assets" element={<Assets />} />
+                <Route path="assets/shared" element={<Assets />} />
+                <Route path="assets/:projectId" element={<Assets />} />
                 <Route path="batch-import" element={<BatchImport />} />
                 <Route path="guide" element={<Guide />} />
                 <Route path="settings" element={<SettingPage />}>
@@ -117,6 +122,7 @@ function App() {
                   </Route>
                   <Route path="transcriber" element={<TranscriberPage />} />
                   <Route path="feishu" element={<FeishuPage />} />
+                  <Route path="obsidian" element={<ObsidianPage />} />
                   <Route path="local-downloader" element={<LocalDownloaderPage />} />
                   <Route path="access-password" element={<AccessPassword />} />
                   <Route path="monitor" element={<Monitor />}></Route>

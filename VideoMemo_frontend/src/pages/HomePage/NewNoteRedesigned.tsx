@@ -1,4 +1,4 @@
-import { FC, useEffect, useMemo, useRef, useState } from 'react'
+import { FC, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Check,
@@ -18,15 +18,16 @@ import {
   ArrowRight,
   Bot,
   Newspaper,
+  FileText,
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { generateNote } from '@/services/note.ts'
 import { uploadFile } from '@/services/upload.ts'
 import { useTaskStore } from '@/store/taskStore'
 import { useModelStore } from '@/store/modelStore'
-import { noteStyles, noteFormats } from '@/constant/note.ts'
+import { noteStyles, noteFormats, videoQualityOptions } from '@/constant/note.ts'
 import { detectPlatform, getCustomPlatforms, setCustomPlatforms } from '@/utils/platform'
-import { listCustomPlatforms } from '@/services/downloader'
+import { listCustomPlatforms, getDownloadModeConfig } from '@/services/downloader'
 import { Pf, PLATFORMS } from '@/components/design/PlatformAvatar'
 import { Field } from '@/components/design/Field'
 import { Chip } from '@/components/design/Chip'
@@ -35,6 +36,16 @@ import { Segmented } from '@/components/design/Segmented'
 import { VmSelect } from '@/components/design/VmSelect'
 import { GenHero, Spinner } from '@/components/design/animations'
 import { useVmLang, trVm } from '@/i18n/redesign'
+import {
+  getWxChannelsStatus,
+  startWxChannels,
+  stopWxChannels,
+  getWxChannelsDownloads,
+  downloadWxShare,
+  WxChannelsStatus,
+  WxDownloadItem,
+} from '@/services/wxchannels'
+import WxChannelsPanel from './components/WxChannelsPanel'
 
 const QUALITIES = [
   { value: 'fast', zh: '快速', en: 'Fast' },
@@ -47,6 +58,7 @@ const FORMAT_ICONS: Record<string, JSX.Element> = {
   link: <LinkIcon size={15} />,
   screenshot: <ImageIcon size={15} />,
   summary: <Sparkles size={15} />,
+  condensed: <FileText size={15} />,
 }
 
 const STEP_DEFS = [
@@ -57,12 +69,12 @@ const STEP_DEFS = [
   { key: 'SUCCESS', zhKey: 'step_done', icon: <Check size={18} /> },
 ]
 
-const DEFAULT_FORMATS = ['toc', 'screenshot', 'summary']
+const DEFAULT_FORMATS = ['toc', 'condensed', 'summary']
 
 /* -------------------- 未运行草稿持久化 -------------------- */
 // 新建笔记表单内容自动存 localStorage：切走页面再回来（组件重挂载）恢复上次还没提交运行的内容；
-// 提交成功后清除。
-const DRAFT_KEY = 'vm-note-draft'
+// 提交成功后清除。导出供失败任务「返回修改」把参数写回表单。
+export const DRAFT_KEY = 'vm-note-draft'
 interface NoteDraft {
   platform?: string
   url?: string
@@ -75,6 +87,9 @@ interface NoteDraft {
   cols?: number
   rows?: number
   extras?: string
+  downloadMode?: string
+  videoQuality?: string
+  engineChoice?: string
 }
 function loadDraft(): NoteDraft {
   try {
@@ -106,10 +121,23 @@ const NewNoteRedesigned: FC = () => {
   const [view, setView] = useState<'form' | 'flow'>('form')
 
   const [platform, setPlatform] = useState(draft.platform ?? 'bilibili')
-  const [touchedPf, setTouchedPf] = useState(false)
+  // 下载模式：cookie=智能 Cookie（原平台下载器）；engine=双引擎下载（yt-dlp+lux）；local=本地视频
+  const [downloadMode, setDownloadMode] = useState<string>(
+    draft.downloadMode ?? (draft.platform === 'local' ? 'local' : 'cookie'),
+  )
+  const [videoQuality, setVideoQuality] = useState<string>(draft.videoQuality ?? 'audio')
+  // 引擎通道：ytdlp（内置包恒就绪）/ lux（需安装 exe）；选哪个下载就走哪条通道
+  const [engineChoice, setEngineChoice] = useState<string>(draft.engineChoice ?? 'ytdlp')
+  const [engineConfig, setEngineConfig] = useState<Awaited<ReturnType<typeof getDownloadModeConfig>> | null>(null)
+  // 微信视频号下载：服务状态 + 下载目录里已下载的视频
+  const [wxStatus, setWxStatus] = useState<WxChannelsStatus | null>(null)
+  const [wxDownloads, setWxDownloads] = useState<WxDownloadItem[]>([])
+  const [wxLoading, setWxLoading] = useState(false)
+  const [wxBusy, setWxBusy] = useState(false)
+  const [wxDownloading, setWxDownloading] = useState(false)
   const [url, setUrl] = useState(draft.url ?? '')
   const [modelName, setModelName] = useState(draft.modelName ?? '')
-  const [style, setStyle] = useState(draft.style ?? 'minimal')
+  const [style, setStyle] = useState(draft.style ?? 'obsidian_deep')
   const [quality, setQuality] = useState(draft.quality ?? 'medium')
   // 默认生成「目录 / 原片截图 / AI 总结」。
   // 「原片跳转」（link）会让 LLM 改用线性时间组织内容，破坏概念分组的笔记结构，
@@ -154,6 +182,9 @@ const NewNoteRedesigned: FC = () => {
           cols,
           rows,
           extras,
+          downloadMode,
+          videoQuality,
+          engineChoice,
         })
       )
     } catch {
@@ -172,6 +203,9 @@ const NewNoteRedesigned: FC = () => {
     cols,
     rows,
     extras,
+    downloadMode,
+    videoQuality,
+    engineChoice,
   ])
 
   useEffect(() => {
@@ -190,10 +224,102 @@ const NewNoteRedesigned: FC = () => {
   }, [modelList, modelName])
 
   useEffect(() => {
-    if (!url || (platform === 'local' && touchedPf)) return
+    if (!url || platform === 'local' || platform === 'wxchannels') return
     const detected = detectPlatform(url)
     if (detected && detected !== platform) setPlatform(detected)
-  }, [url, platform, touchedPf])
+  }, [url, platform])
+
+  // 本地视频 / 微信视频号模式：平台锁定，不允许改
+  useEffect(() => {
+    if (downloadMode === 'local' && platform !== 'local') setPlatform('local')
+    if (downloadMode === 'wxchannels' && platform !== 'wxchannels') setPlatform('wxchannels')
+  }, [downloadMode, platform])
+
+  // 双引擎模式：拉取引擎就绪状态（lux / yt-dlp）
+  useEffect(() => {
+    if (downloadMode !== 'engine') return
+    getDownloadModeConfig()
+      .then(setEngineConfig)
+      .catch(() => setEngineConfig(null))
+  }, [downloadMode])
+
+  // 微信视频号模式：拉取服务状态 + 下载目录文件列表
+  const refreshWx = useCallback(async () => {
+    if (downloadMode !== 'wxchannels') return
+    setWxLoading(true)
+    try {
+      const [st, files] = await Promise.all([
+        getWxChannelsStatus(),
+        getWxChannelsDownloads(30),
+      ])
+      setWxStatus(st)
+      setWxDownloads(Array.isArray(files) ? files : [])
+    } catch {
+      /* 全局拦截器已弹 toast；此处静默，保持面板可操作 */
+    } finally {
+      setWxLoading(false)
+    }
+  }, [downloadMode])
+
+  useEffect(() => {
+    refreshWx()
+  }, [refreshWx])
+
+  const handleWxStart = async () => {
+    setWxBusy(true)
+    try {
+      await startWxChannels()
+    } catch {
+      // 首次运行会弹 UAC，等待用户确认可能超过请求超时，属预期内
+    } finally {
+      setWxBusy(false)
+      refreshWx()
+    }
+  }
+
+  const handleWxStop = async () => {
+    setWxBusy(true)
+    try {
+      await stopWxChannels()
+    } catch {
+      /* 同上 */
+    } finally {
+      setWxBusy(false)
+      refreshWx()
+    }
+  }
+
+  // 粘贴分享链接 → 一键下载为 MP4（后端走 wx 服务 parse_sph + /play）
+  const handleWxDownload = async (link: string) => {
+    const u = link.trim()
+    if (!u || wxDownloading) return
+    if (!wxStatus?.running || !wxStatus?.api_listening) {
+      toast.error(trVm('wxNeedRunning', lang))
+      return
+    }
+    setWxDownloading(true)
+    try {
+      const res = await downloadWxShare(u)
+      toast.success(lang === 'zh' ? `已下载：${res.name}` : `Downloaded: ${res.name}`)
+      refreshWx()
+    } catch (e: any) {
+      toast.error(e?.msg || (lang === 'zh' ? '下载失败' : 'Download failed'))
+    } finally {
+      setWxDownloading(false)
+    }
+  }
+
+  // 模式切换：进入 local/wxchannels 锁平台，离开恢复自动检测
+  const switchMode = (m: string) => {
+    setDownloadMode(m)
+    if (m === 'local') {
+      setPlatform('local')
+    } else if (m === 'wxchannels') {
+      setPlatform('wxchannels')
+    } else if (platform === 'local' || platform === 'wxchannels') {
+      setPlatform(detectPlatform(url) || 'bilibili')
+    }
+  }
 
   const platformOpts = useMemo(() => {
     const base = Object.keys(PLATFORMS).map(k => ({ value: k }))
@@ -226,7 +352,15 @@ const NewNoteRedesigned: FC = () => {
   const onGenerate = async () => {
     if (submitting) return
     if (!url) {
-      toast.error(lang === 'zh' ? '请填写视频链接或本地路径' : 'Please provide a URL or local path')
+      toast.error(
+        downloadMode === 'wxchannels'
+          ? lang === 'zh'
+            ? '请先在下方选择一个已下载的视频'
+            : 'Pick a downloaded video first'
+          : lang === 'zh'
+            ? '请填写视频链接或本地路径'
+            : 'Please provide a URL or local path',
+      )
       return
     }
     if (!modelName) {
@@ -260,6 +394,9 @@ const NewNoteRedesigned: FC = () => {
       // 采样间隔留空时兜底为默认 30 秒
       video_interval: intervalSec === '' ? 30 : intervalSec,
       grid_size: [cols, rows] as [number, number],
+      download_mode: downloadMode,
+      video_quality: videoQuality,
+      engine_choice: engineChoice,
     }
     try {
       const data: any = await generateNote(payload as any)
@@ -327,18 +464,112 @@ const NewNoteRedesigned: FC = () => {
             文章总结
           </button>
         </div>
+        {/* 下载模式：智能 Cookie / 双引擎 / 本地视频 */}
+        <div className="vm-field" style={{ marginBottom: 12 }}>
+          <div className="vm-field-head">
+            <span className="vm-field-label">{trVm('downloadMode', lang)}</span>
+            <span className="vm-field-hint">{lang === 'zh' ? 'Download method' : '下载方式'}</span>
+          </div>
+          <Segmented
+            value={downloadMode}
+            onChange={switchMode}
+            options={[
+              { value: 'cookie', label: lang === 'zh' ? '智能 Cookie' : 'Smart Cookie' },
+              { value: 'engine', label: lang === 'zh' ? '双引擎下载' : 'Dual engine' },
+              { value: 'local', label: lang === 'zh' ? '本地视频' : 'Local video' },
+              { value: 'wxchannels', label: lang === 'zh' ? '微信视频号下载' : 'WeChat Channels' },
+            ]}
+          />
+        </div>
+        {/* 双引擎模式：引擎通道二选一（选哪个下载就走哪条通道） */}
+        {downloadMode === 'engine' && (
+          <div className="vm-field" style={{ marginBottom: 12 }}>
+            <div className="vm-field-head">
+              <span className="vm-field-label">{trVm('engineChannel', lang)}</span>
+              <span className="vm-field-hint">{lang === 'zh' ? 'Engine channel' : '引擎通道'}</span>
+            </div>
+            <div className="vm-row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              <Chip on={engineChoice === 'ytdlp'} onClick={() => setEngineChoice('ytdlp')}>
+                <span style={{ color: 'var(--vm-ok)', fontWeight: 700 }}>yt-dlp</span>
+                <span style={{ color: 'var(--vm-ok)' }}>✓ 已就绪</span>
+              </Chip>
+              {engineConfig?.lux_installed ? (
+                <Chip on={engineChoice === 'lux'} onClick={() => setEngineChoice('lux')}>
+                  <span style={{ fontWeight: 700 }}>lux</span>
+                  <span style={{ color: 'var(--vm-ok)' }}>✓ 已就绪</span>
+                </Chip>
+              ) : (
+                <>
+                  <Chip on={false} disabled>
+                    <span style={{ color: 'var(--vm-faint)' }}>lux</span>
+                    <span style={{ color: 'var(--vm-faint)' }}>
+                      {lang === 'zh' ? '未安装' : 'not installed'}
+                    </span>
+                  </Chip>
+                  <span className="vm-field-hint" style={{ color: 'var(--vm-faint)', fontSize: 12 }}>
+                    {lang === 'zh'
+                      ? 'lux 未随包安装，请到 设置 → 下载配置 安装'
+                      : 'lux not bundled — install it in Settings → Downloader'}
+                  </span>
+                </>
+              )}
+            </div>
+            {/* 引擎简介 */}
+            <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 2 }}>
+              <span className="vm-field-hint" style={{ fontSize: 12, lineHeight: 1.5 }}>
+                {trVm('engineDescYtdlp', lang)}
+              </span>
+              <span className="vm-field-hint" style={{ fontSize: 12, lineHeight: 1.5 }}>
+                {trVm('engineDescLux', lang)}
+              </span>
+            </div>
+          </div>
+        )}
         <div style={{ display: 'flex', gap: 10 }}>
+          {/* 平台分类选择：仅智能 Cookie 模式需要；双引擎按 URL 域名自动路由引擎，本地视频/微信视频号由系统锁定 */}
+          {downloadMode === 'local' ? (
+            <span
+              className="vm-badge vm-badge-neutral"
+              style={{ height: 38, borderRadius: 'var(--vm-radius-sm)', alignSelf: 'center' }}
+            >
+              {lang === 'zh' ? '本地视频' : 'Local'}
+            </span>
+          ) : downloadMode === 'wxchannels' ? (
+            <span
+              className="vm-badge vm-badge-neutral"
+              style={{ height: 38, borderRadius: 'var(--vm-radius-sm)', alignSelf: 'center' }}
+            >
+              <Pf id="wxchannels" sm /> {lang === 'zh' ? '微信视频号' : 'WeChat Channels'}
+            </span>
+          ) : downloadMode === 'engine' ? null : (
           <VmSelect
             width={158}
             value={platform}
             onChange={v => {
               setPlatform(v)
-              setTouchedPf(true)
             }}
             options={platformOpts}
             renderOption={platformOpt}
           />
-          {platform === 'local' ? (
+          )}
+          {downloadMode === 'wxchannels' ? (
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <WxChannelsPanel
+                lang={lang}
+                status={wxStatus}
+                downloads={wxDownloads}
+                loading={wxLoading}
+                busy={wxBusy}
+                selected={url}
+                downloading={wxDownloading}
+                onRefresh={refreshWx}
+                onStart={handleWxStart}
+                onStop={handleWxStop}
+                onPick={p => setUrl(p)}
+                onDownload={handleWxDownload}
+              />
+            </div>
+          ) : platform === 'local' ? (
             <input
               className="vm-input vm-grow vm-input-mono"
               placeholder={trVm('localPath', lang)}
@@ -417,6 +648,22 @@ const NewNoteRedesigned: FC = () => {
             </div>
           )}
         </div>
+        {/* 双引擎模式：视频清晰度 */}
+        {downloadMode === 'engine' && (
+          <div className="vm-field" style={{ marginTop: 12, marginBottom: 0 }}>
+            <div className="vm-field-head">
+              <span className="vm-field-label">{trVm('videoQuality', lang)}</span>
+              <span className="vm-field-hint">
+                {lang === 'zh' ? 'Video quality' : '视频清晰度'} · {trVm('audioOnly', lang)}
+              </span>
+            </div>
+            <Segmented
+              value={videoQuality}
+              onChange={setVideoQuality}
+              options={videoQualityOptions.map(q => ({ value: q.value, label: q.label }))}
+            />
+          </div>
+        )}
         {platform === 'local' && (
           <div
             style={{
@@ -528,7 +775,7 @@ const NewNoteRedesigned: FC = () => {
         >
           <div className="vm-chip-row">
             {noteFormats.map(f => {
-              const disabled = f.value === 'link' && platform === 'local'
+              const disabled = f.value === 'link' && (platform === 'local' || platform === 'wxchannels')
               const on = formats.includes(f.value)
               return (
                 <Chip key={f.value} on={on} disabled={disabled} onClick={() => toggleFmt(f.value)}>
@@ -544,6 +791,10 @@ const NewNoteRedesigned: FC = () => {
                 </Chip>
               )
             })}
+          </div>
+          {/* 原片截图注释：需选择带视觉的 AI 模型 */}
+          <div className="vm-field-hint" style={{ marginTop: 8, whiteSpace: 'normal' }}>
+            {trVm('screenshotVisionHint', lang)}
           </div>
           {screenshotEnabled && (
             <div className="vm-screenshot-note vm-fade-up">

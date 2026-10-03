@@ -16,6 +16,7 @@ import {
   Trash2,
   Send,
   ExternalLink,
+  BookMarked,
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { Button } from '@/components/ui/button'
@@ -23,6 +24,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/u
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Badge } from '@/components/ui/badge'
 import { type ExportFormat } from '@/services/note'
+import { type ObsidianSyncInfo } from '@/services/obsidian'
 
 interface VersionNote {
   ver_id: string
@@ -60,6 +62,10 @@ interface NoteHeaderProps {
   onPushFeishu?: () => void
   feishuUrl?: string
   feishuPushing?: boolean
+  /** 一键同步到 Obsidian 知识库 */
+  onSyncObsidian?: () => void
+  obsidianSyncing?: boolean
+  obsidianLastInfo?: ObsidianSyncInfo | null
 }
 
 const VERSION_SOURCE_LABEL: Record<string, string> = {
@@ -137,6 +143,9 @@ export function MarkdownHeader({
   onPushFeishu,
   feishuUrl,
   feishuPushing,
+  onSyncObsidian,
+  obsidianSyncing,
+  obsidianLastInfo,
 }: NoteHeaderProps) {
   const [copied, setCopied] = useState(false)
   const [exportOpen, setExportOpen] = useState(false)
@@ -431,6 +440,49 @@ export function MarkdownHeader({
                     </a>
                   </TooltipTrigger>
                   <TooltipContent>在飞书中打开已生成的文档</TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            )}
+          </>
+        )}
+        {onSyncObsidian && (
+          <>
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    onClick={onSyncObsidian}
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 px-2"
+                    disabled={obsidianSyncing}
+                  >
+                    <BookMarked className="mr-1.5 h-4 w-4" />
+                    <span className="text-sm">
+                      {obsidianSyncing ? '同步中…' : obsidianLastInfo ? '重新同步' : '同步 Obsidian'}
+                    </span>
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  {obsidianLastInfo
+                    ? `已同步到 ${obsidianLastInfo.folder_path}，点击重新同步`
+                    : '一键同步当前笔记到 Obsidian 知识库文件夹'}
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+            {obsidianLastInfo && (
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <a
+                      href={`obsidian://open?path=${encodeURIComponent(obsidianLastInfo.file_path)}`}
+                      className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-sm font-medium text-indigo-600 transition-colors hover:bg-indigo-50"
+                    >
+                      <ExternalLink className="h-4 w-4" />
+                      <span>打开 Obsidian</span>
+                    </a>
+                  </TooltipTrigger>
+                  <TooltipContent>在 Obsidian 中打开刚才同步的笔记</TooltipContent>
                 </Tooltip>
               </TooltipProvider>
             )}

@@ -18,6 +18,7 @@ import {
   KeyRound,
   Laptop,
   Send,
+  BookMarked,
   Newspaper,
   Radio,
   PanelLeftClose,
@@ -25,6 +26,7 @@ import {
   Bell,
   ChevronDown,
   ChevronRight,
+  FolderOpen,
 } from 'lucide-react'
 import { BrandMark } from '@/components/design/BrandMark'
 import { trVm, useVmLang, VM_STRINGS } from '@/i18n/redesign'
@@ -41,6 +43,7 @@ type NavItem = {
 const workspaceNav: NavItem[] = [
   { id: 'workspace', path: '/', icon: <LayoutGrid />, zhKey: 'workspace' },
   { id: 'articles', path: '/articles', icon: <Newspaper />, zhKey: 'articles' },
+  { id: 'assets', path: '/assets', icon: <FolderOpen />, zhKey: 'assets' },
   { id: 'collections', path: '/collections', icon: <Library />, zhKey: 'collections' },
   { id: 'knowledge', path: '/knowledge', icon: <Search />, zhKey: 'knowledge' },
   { id: 'tasks', path: '/tasks', icon: <ListTodo />, zhKey: 'tasks' },
@@ -83,6 +86,12 @@ const settingsNav: NavItem[] = [
     zhKey: 'feishu',
   },
   {
+    id: 'obsidian',
+    path: '/settings/obsidian',
+    icon: <BookMarked />,
+    zhKey: 'obsidian',
+  },
+  {
     id: 'access-password',
     path: '/settings/access-password',
     icon: <KeyRound />,
@@ -95,6 +104,7 @@ const settingsNav: NavItem[] = [
 const pageMeta: Record<string, { titleKey: string; subKey: string }> = {
   '/': { titleKey: 'workspace', subKey: 'newNoteSub' },
   '/articles': { titleKey: 'articles', subKey: 'articlesSub' },
+  '/assets': { titleKey: 'assets', subKey: 'assetsSub' },
   '/trends': { titleKey: 'trendRadar', subKey: 'trendRadarSub' },
   '/subscriptions': { titleKey: 'subscriptions', subKey: 'subscriptionsSub' },
   '/tasks': { titleKey: 'tasks', subKey: 'tasksSub' },
@@ -210,6 +220,8 @@ const MainLayout: FC = () => {
               ? 'localDownloader'
               : seg === 'feishu'
                 ? 'feishu'
+              : seg === 'obsidian'
+                ? 'obsidian'
               : seg === 'access-password'
               ? 'accessPassword'
               : seg === 'monitor'

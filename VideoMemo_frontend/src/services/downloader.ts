@@ -42,3 +42,25 @@ export const upsertCustomPlatform = async (data: CustomPlatform): Promise<Custom
 export const deleteCustomPlatform = async (key: string) => {
   return await request.delete('/custom_platforms/' + key)
 }
+
+/* ---- 下载模式：双引擎（yt-dlp + lux）配置 ---- */
+
+export interface DownloadModeConfig {
+  engine_dir: string
+  default_dir: string
+  lux_installed: boolean
+  ytdlp_exe_installed: boolean
+  ytdlp_python: boolean
+}
+
+export const getDownloadModeConfig = async (): Promise<DownloadModeConfig> => {
+  return await request.get('/download_mode_config')
+}
+
+export const updateDownloadModeConfig = async (engine_dir: string): Promise<DownloadModeConfig> => {
+  return await request.post('/download_mode_config', { engine_dir })
+}
+
+export const installDownloadEngine = async (engine: 'lux' | 'ytdlp'): Promise<{ msg: string }> => {
+  return await request.post('/download_mode_install', { engine })
+}

@@ -11,6 +11,7 @@ import {
   Pause as PauseIcon,
   Play,
   Plus,
+  Save,
   Sparkles,
   Upload,
   X as XIcon,
@@ -48,9 +49,9 @@ import {
 import WxChannelsPanel from './components/WxChannelsPanel'
 
 const QUALITIES = [
-  { value: 'fast', zh: '快速', en: 'Fast' },
-  { value: 'medium', zh: '标准', en: 'Standard' },
   { value: 'slow', zh: '高质量', en: 'Best' },
+  { value: 'medium', zh: '标准', en: 'Standard' },
+  { value: 'fast', zh: '快速', en: 'Fast' },
 ]
 
 const FORMAT_ICONS: Record<string, JSX.Element> = {
@@ -75,12 +76,27 @@ const DEFAULT_FORMATS = ['toc', 'condensed', 'summary']
 // 新建笔记表单内容自动存 localStorage：切走页面再回来（组件重挂载）恢复上次还没提交运行的内容；
 // 提交成功后清除。导出供失败任务「返回修改」把参数写回表单。
 export const DRAFT_KEY = 'vm-note-draft'
+
+// 常用备注：用户保存的「补充说明」模板，纯前端 localStorage 存储，点击即可一键填入
+const COMMON_EXTRAS_KEY = 'vm-common-extras'
+const COMMON_EXTRAS_MAX = 20
+
+function loadCommonExtras(): string[] {
+  try {
+    const arr = JSON.parse(localStorage.getItem(COMMON_EXTRAS_KEY) || '[]')
+    return Array.isArray(arr) ? arr.filter(x => typeof x === 'string') : []
+  } catch {
+    return []
+  }
+}
+
 interface NoteDraft {
   platform?: string
   url?: string
   modelName?: string
   style?: string
   quality?: string
+  qualityTouched?: boolean
   formats?: string[]
   vision?: boolean
   intervalSec?: number | ''
@@ -137,7 +153,12 @@ const NewNoteRedesigned: FC = () => {
   const [url, setUrl] = useState(draft.url ?? '')
   const [modelName, setModelName] = useState(draft.modelName ?? '')
   const [style, setStyle] = useState(draft.style ?? 'obsidian_deep')
-  const [quality, setQuality] = useState(draft.quality ?? 'medium')
+  // 仅当用户上轮手动选过音质（qualityTouched）才沿用草稿值，否则一律默认「高质量 slow」。
+  // 这样老草稿里历史默认的 medium/快速也会自动升级为高质量。
+  const [qualityTouched, setQualityTouched] = useState(draft.qualityTouched ?? false)
+  const [quality, setQuality] = useState(
+    draft.qualityTouched ? draft.quality ?? 'slow' : 'slow',
+  )
   // 默认生成「目录 / 原片截图 / AI 总结」。
   // 「原片跳转」（link）会让 LLM 改用线性时间组织内容，破坏概念分组的笔记结构，
   // 所以保持需要用户主动勾选。
@@ -148,6 +169,46 @@ const NewNoteRedesigned: FC = () => {
   const [cols, setCols] = useState(draft.cols ?? 2)
   const [rows, setRows] = useState(draft.rows ?? 2)
   const [extras, setExtras] = useState(draft.extras ?? '')
+  const [commonExtras, setCommonExtras] = useState<string[]>(loadCommonExtras)
+
+  /** 保存当前备注为常用模板（去空、去重、最新在前、限 COMMON_EXTRAS_MAX 条） */
+  const handleSaveCommonExtras = () => {
+    const text = extras.trim()
+    if (!text) {
+      toast.error(lang === 'zh' ? '请先输入要保存的备注' : 'Enter a note first')
+      return
+    }
+    if (commonExtras.includes(text)) {
+      toast.error(lang === 'zh' ? '该备注已保存过' : 'Already saved')
+      return
+    }
+    const next = [text, ...commonExtras].slice(0, COMMON_EXTRAS_MAX)
+    setCommonExtras(next)
+    try {
+      localStorage.setItem(COMMON_EXTRAS_KEY, JSON.stringify(next))
+    } catch {
+      /* 存储满等，忽略 */
+    }
+    toast.success(lang === 'zh' ? '已保存为常用备注' : 'Saved as common note')
+  }
+
+  /** 一键填入某条常用备注 */
+  const handlePickCommonExtras = (text: string) => {
+    setExtras(text)
+    toast.success(lang === 'zh' ? '已填入备注' : 'Note filled')
+  }
+
+  /** 删除单条常用备注 */
+  const handleRemoveCommonExtras = (text: string) => {
+    const next = commonExtras.filter(x => x !== text)
+    setCommonExtras(next)
+    try {
+      localStorage.setItem(COMMON_EXTRAS_KEY, JSON.stringify(next))
+    } catch {
+      /* ignore */
+    }
+  }
+
   const [isUploading, setIsUploading] = useState(false)
   const [uploadOk, setUploadOk] = useState(false)
   const [submitting, setSubmitting] = useState(false)
@@ -175,6 +236,7 @@ const NewNoteRedesigned: FC = () => {
           modelName,
           style,
           quality,
+          qualityTouched,
           formats,
           vision,
           intervalSec,
@@ -718,7 +780,10 @@ const NewNoteRedesigned: FC = () => {
           </div>
           <Segmented
             value={quality}
-            onChange={setQuality}
+            onChange={v => {
+              setQuality(v)
+              setQualityTouched(true)
+            }}
             options={QUALITIES.map(q => ({ value: q.value, label: q[lang] }))}
           />
         </div>
@@ -847,6 +912,78 @@ const NewNoteRedesigned: FC = () => {
             value={extras}
             onChange={e => setExtras(e.target.value)}
           />
+          {/* 保存为常用备注 */}
+          <div className="vm-row" style={{ gap: 10, marginTop: 10 }}>
+            <button
+              type="button"
+              className="vm-btn vm-btn-outline"
+              onClick={handleSaveCommonExtras}
+              style={{ padding: '6px 12px', fontSize: 13 }}
+            >
+              <Save size={14} />
+              {lang === 'zh' ? '保存为常用备注' : 'Save as common note'}
+            </button>
+            <span className="vm-field-hint" style={{ whiteSpace: 'normal' }}>
+              {lang === 'zh'
+                ? '把当前备注存为模板，之后点击即可一键填入'
+                : 'Save this note as a reusable, one-click template'}
+            </span>
+          </div>
+          {/* 常用备注：点击一键填入，× 删除 */}
+          {commonExtras.length > 0 && (
+            <div className="vm-chip-row" style={{ marginTop: 12 }}>
+              {commonExtras.map(text => {
+                const active = text === extras.trim()
+                return (
+                  <div
+                    key={text}
+                    title={lang === 'zh' ? '点击填入；× 删除' : 'Click to fill; × to remove'}
+                    onClick={() => handlePickCommonExtras(text)}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      maxWidth: '100%',
+                      border: `1px solid ${
+                        active ? 'var(--vm-primary)' : 'var(--vm-border, #e5e7eb)'
+                      }`,
+                      borderRadius: 999,
+                      padding: '4px 6px 4px 11px',
+                      fontSize: 12.5,
+                      color: active ? 'var(--vm-primary)' : 'var(--vm-text)',
+                      background: active ? 'var(--vm-primary-soft, #eef4ff)' : 'transparent',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <span
+                      style={{
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        maxWidth: 220,
+                      }}
+                    >
+                      {text}
+                    </span>
+                    <span
+                      onClick={e => {
+                        e.stopPropagation()
+                        handleRemoveCommonExtras(text)
+                      }}
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        borderRadius: 999,
+                        padding: 2,
+                      }}
+                    >
+                      <XIcon size={12} />
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+          )}
         </Field>
       </div>
 

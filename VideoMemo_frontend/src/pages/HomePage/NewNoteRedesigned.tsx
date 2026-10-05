@@ -27,7 +27,7 @@ import { useTaskStore } from '@/store/taskStore'
 import { useModelStore } from '@/store/modelStore'
 import { noteStyles, noteFormats, videoQualityOptions } from '@/constant/note.ts'
 import { detectPlatform, getCustomPlatforms, setCustomPlatforms } from '@/utils/platform'
-import { listCustomPlatforms, getDownloadModeConfig } from '@/services/downloader'
+import { listCustomPlatforms } from '@/services/downloader'
 import { Pf, PLATFORMS } from '@/components/design/PlatformAvatar'
 import { Field } from '@/components/design/Field'
 import { Chip } from '@/components/design/Chip'
@@ -121,14 +121,13 @@ const NewNoteRedesigned: FC = () => {
   const [view, setView] = useState<'form' | 'flow'>('form')
 
   const [platform, setPlatform] = useState(draft.platform ?? 'bilibili')
-  // 下载模式：cookie=智能 Cookie（原平台下载器）；engine=双引擎下载（yt-dlp+lux）；local=本地视频
+  // 下载模式：cookie=智能 Cookie（原平台下载器）；engine=引擎下载（yt-dlp）；local=本地视频
   const [downloadMode, setDownloadMode] = useState<string>(
     draft.downloadMode ?? (draft.platform === 'local' ? 'local' : 'cookie'),
   )
   const [videoQuality, setVideoQuality] = useState<string>(draft.videoQuality ?? 'audio')
-  // 引擎通道：ytdlp（内置包恒就绪）/ lux（需安装 exe）；选哪个下载就走哪条通道
-  const [engineChoice, setEngineChoice] = useState<string>(draft.engineChoice ?? 'ytdlp')
-  const [engineConfig, setEngineConfig] = useState<Awaited<ReturnType<typeof getDownloadModeConfig>> | null>(null)
+  // 引擎通道：固定 yt-dlp（lux 已移除；字段保留兼容旧草稿/请求体）
+  const [engineChoice, setEngineChoice] = useState<string>('ytdlp')
   // 微信视频号下载：服务状态 + 下载目录里已下载的视频
   const [wxStatus, setWxStatus] = useState<WxChannelsStatus | null>(null)
   const [wxDownloads, setWxDownloads] = useState<WxDownloadItem[]>([])
@@ -234,14 +233,6 @@ const NewNoteRedesigned: FC = () => {
     if (downloadMode === 'local' && platform !== 'local') setPlatform('local')
     if (downloadMode === 'wxchannels' && platform !== 'wxchannels') setPlatform('wxchannels')
   }, [downloadMode, platform])
-
-  // 双引擎模式：拉取引擎就绪状态（lux / yt-dlp）
-  useEffect(() => {
-    if (downloadMode !== 'engine') return
-    getDownloadModeConfig()
-      .then(setEngineConfig)
-      .catch(() => setEngineConfig(null))
-  }, [downloadMode])
 
   // 微信视频号模式：拉取服务状态 + 下载目录文件列表
   const refreshWx = useCallback(async () => {
@@ -464,7 +455,7 @@ const NewNoteRedesigned: FC = () => {
             文章总结
           </button>
         </div>
-        {/* 下载模式：智能 Cookie / 双引擎 / 本地视频 */}
+        {/* 下载模式：智能 Cookie / 引擎下载 / 本地视频 */}
         <div className="vm-field" style={{ marginBottom: 12 }}>
           <div className="vm-field-head">
             <span className="vm-field-label">{trVm('downloadMode', lang)}</span>
@@ -475,58 +466,14 @@ const NewNoteRedesigned: FC = () => {
             onChange={switchMode}
             options={[
               { value: 'cookie', label: lang === 'zh' ? '智能 Cookie' : 'Smart Cookie' },
-              { value: 'engine', label: lang === 'zh' ? '双引擎下载' : 'Dual engine' },
+              { value: 'engine', label: lang === 'zh' ? '引擎下载' : 'Engine download' },
               { value: 'local', label: lang === 'zh' ? '本地视频' : 'Local video' },
               { value: 'wxchannels', label: lang === 'zh' ? '微信视频号下载' : 'WeChat Channels' },
             ]}
           />
         </div>
-        {/* 双引擎模式：引擎通道二选一（选哪个下载就走哪条通道） */}
-        {downloadMode === 'engine' && (
-          <div className="vm-field" style={{ marginBottom: 12 }}>
-            <div className="vm-field-head">
-              <span className="vm-field-label">{trVm('engineChannel', lang)}</span>
-              <span className="vm-field-hint">{lang === 'zh' ? 'Engine channel' : '引擎通道'}</span>
-            </div>
-            <div className="vm-row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-              <Chip on={engineChoice === 'ytdlp'} onClick={() => setEngineChoice('ytdlp')}>
-                <span style={{ color: 'var(--vm-ok)', fontWeight: 700 }}>yt-dlp</span>
-                <span style={{ color: 'var(--vm-ok)' }}>✓ 已就绪</span>
-              </Chip>
-              {engineConfig?.lux_installed ? (
-                <Chip on={engineChoice === 'lux'} onClick={() => setEngineChoice('lux')}>
-                  <span style={{ fontWeight: 700 }}>lux</span>
-                  <span style={{ color: 'var(--vm-ok)' }}>✓ 已就绪</span>
-                </Chip>
-              ) : (
-                <>
-                  <Chip on={false} disabled>
-                    <span style={{ color: 'var(--vm-faint)' }}>lux</span>
-                    <span style={{ color: 'var(--vm-faint)' }}>
-                      {lang === 'zh' ? '未安装' : 'not installed'}
-                    </span>
-                  </Chip>
-                  <span className="vm-field-hint" style={{ color: 'var(--vm-faint)', fontSize: 12 }}>
-                    {lang === 'zh'
-                      ? 'lux 未随包安装，请到 设置 → 下载配置 安装'
-                      : 'lux not bundled — install it in Settings → Downloader'}
-                  </span>
-                </>
-              )}
-            </div>
-            {/* 引擎简介 */}
-            <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 2 }}>
-              <span className="vm-field-hint" style={{ fontSize: 12, lineHeight: 1.5 }}>
-                {trVm('engineDescYtdlp', lang)}
-              </span>
-              <span className="vm-field-hint" style={{ fontSize: 12, lineHeight: 1.5 }}>
-                {trVm('engineDescLux', lang)}
-              </span>
-            </div>
-          </div>
-        )}
         <div style={{ display: 'flex', gap: 10 }}>
-          {/* 平台分类选择：仅智能 Cookie 模式需要；双引擎按 URL 域名自动路由引擎，本地视频/微信视频号由系统锁定 */}
+          {/* 平台分类选择：仅智能 Cookie 模式需要；引擎模式按 URL 自动识别平台，本地视频/微信视频号由系统锁定 */}
           {downloadMode === 'local' ? (
             <span
               className="vm-badge vm-badge-neutral"
@@ -648,7 +595,7 @@ const NewNoteRedesigned: FC = () => {
             </div>
           )}
         </div>
-        {/* 双引擎模式：视频清晰度 */}
+        {/* 引擎模式：视频清晰度 */}
         {downloadMode === 'engine' && (
           <div className="vm-field" style={{ marginTop: 12, marginBottom: 0 }}>
             <div className="vm-field-head">
@@ -662,6 +609,17 @@ const NewNoteRedesigned: FC = () => {
               onChange={setVideoQuality}
               options={videoQualityOptions.map(q => ({ value: q.value, label: q.label }))}
             />
+            {/* 说明：两排小字（第一排默认笔记 / 第二排勾选截图/视频理解） */}
+            <div className="vm-field-hint" style={{ marginTop: 8, lineHeight: 1.7 }}>
+              {lang === 'zh'
+                ? '默认笔记流程只下载最优音频，此选项不生效。'
+                : 'Default note flow downloads best audio only — this option is ignored.'}
+            </div>
+            <div className="vm-field-hint" style={{ lineHeight: 1.7 }}>
+              {lang === 'zh'
+                ? '勾选「原片截图」或开启「视频理解」时，此清晰度控制 yt-dlp 合并档位（最佳＝最优视频＋最优音频合并；1080p 等＝限高合并）。'
+                : 'With "Screenshots" or "Video understanding" enabled, this controls the yt-dlp merge tier (Best = best video + best audio; 1080p = height-capped merge).'}
+            </div>
           </div>
         )}
         {platform === 'local' && (

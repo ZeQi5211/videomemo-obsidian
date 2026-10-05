@@ -15,6 +15,7 @@ from app.enmus.note_enums import DownloadQuality
 from app.models.audio_model import AudioDownloadResult
 from app.models.transcriber_model import TranscriptResult, TranscriptSegment
 from app.utils.path_helper import get_data_dir
+from app.services.cookie_manager import CookieConfigManager
 
 
 SHARE_PAGE_UA = (
@@ -52,15 +53,22 @@ class DouyinContentMeta:
     tags: list[str] = field(default_factory=list)
 
 
-def _session() -> requests.Session:
+def _session(cookie: str = "") -> requests.Session:
+    """抖音会话：必须带 Referer；配置了 Cookie 时注入 Cookie 头。
+
+    抖音从 2025 年起反爬要求「新鲜 Cookie」（不要求登录，浏览器访问过
+    douyin.com 即可）。Cookie 来自「下载配置 → 抖音」或浏览器实时读取。
+    """
     session = requests.Session()
-    session.headers.update(
-        {
-            "User-Agent": SHARE_PAGE_UA,
-            "Accept-Language": "zh-CN,zh;q=0.9",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        }
-    )
+    headers = {
+        "User-Agent": SHARE_PAGE_UA,
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Referer": "https://www.douyin.com/",
+    }
+    if cookie:
+        headers["Cookie"] = cookie
+    session.headers.update(headers)
     return session
 
 
@@ -87,11 +95,11 @@ def _extract_aweme_id_from_search_url(url: str) -> Optional[str]:
 
 
 def normalize_to_share_page(url: str) -> str:
-    """www.douyin.com 的 video/note 页面转为移动端分享页。"""
-    note = re.search(r"https?://(?:www\.)?douyin\.com/note/(\d+)", url)
+    """www.douyin.com 的 video/note 页面转为移动端分享页（兼容 m. 域名）。"""
+    note = re.search(r"https?://(?:www\.|m\.)?douyin\.com/note/(\d+)", url)
     if note:
         return f"https://www.iesdouyin.com/share/note/{note.group(1)}/"
-    video = re.search(r"https?://(?:www\.)?douyin\.com/video/(\d+)", url)
+    video = re.search(r"https?://(?:www\.|m\.)?douyin\.com/video/(\d+)", url)
     if video:
         return f"https://www.iesdouyin.com/share/video/{video.group(1)}/"
     search_aweme_id = _extract_aweme_id_from_search_url(url)
@@ -327,6 +335,16 @@ def parse_share_page_html(html: str, page_url: str, original_share: str) -> Douy
         payload = parser(html)
         if not payload:
             continue
+        # 抖音风控/系统过滤：filter_list 非空且无正常数据时，给出可诊断的错误
+        page = ((payload.get("loaderData") or {}).get("video_(id)/page") or {})
+        vinfo = page.get("videoInfoRes") or {}
+        if isinstance(vinfo, dict) and vinfo.get("filter_list"):
+            reasons = [f.get("filter_reason") for f in vinfo["filter_list"] if isinstance(f, dict)]
+            raise DouyinResolveError(
+                "抖音分享页解析失败：作品不可访问（系统返回过滤原因 %s）。"
+                "常见原因：视频已删除/下架、仅自己可见、或地区限制。"
+                % (", ".join(r or "未知" for r in reasons) or "SYSTEM_ITEM_NOT_EXIST")
+            )
         items = _find_item_list(payload)
         if items:
             meta = _meta_from_aweme_item(items[0], original_share)
@@ -347,15 +365,43 @@ def parse_share_page_html(html: str, page_url: str, original_share: str) -> Douy
             )
 
     raise DouyinResolveError(
-        "分享页未找到内嵌公开数据（_ROUTER_DATA / RENDER_DATA）。"
-        "请确认链接有效。"
+        "抖音分享页解析失败：未找到内嵌公开数据（_ROUTER_DATA / RENDER_DATA）。\n"
+        "抖音 2025 年起要求浏览器 Cookie（不要求登录）。请在「下载配置 → 抖音」"
+        "粘贴浏览器访问 douyin.com 后的 Cookie 后重试。"
     )
 
 
-def resolve_douyin_share(share_text: str) -> DouyinContentMeta:
-    session = _session()
+def _resolve_short_link(session: requests.Session, short_url: str) -> tuple[str, str]:
+    """短链仅取 302 Location，提取作品类型(video/note)与 id，不跟随重定向。
+
+    短链跳转 URL 携带 mid/u_code/did/share_sign/from_ssr 等风控参数，
+    服务端对带这些参数的请求会降级返回空 item_list，因此只借它拿 id。
+    """
+    cur = short_url
+    for _ in range(4):
+        r = session.get(cur, allow_redirects=False, timeout=30)
+        loc = r.headers.get("Location") or r.headers.get("location") or ""
+        m = re.search(r"/share/(video|note)/(\d+)", loc)
+        if m:
+            return m.group(1), m.group(2)
+        if r.status_code in (301, 302, 303, 307, 308) and loc:
+            cur = loc
+            continue
+        m2 = re.search(r"(\d{15,20})", loc)
+        if m2:
+            return "video", m2.group(1)
+        break
+    raise DouyinResolveError("无法从短链重定向中解析作品 ID")
+
+
+def resolve_douyin_share(share_text: str, cookie: str = "") -> DouyinContentMeta:
+    session = _session(cookie)
     share_url = expand_share_url(share_text)
     fetch_url = normalize_to_share_page(share_url)
+    if "/share/" not in fetch_url:
+        # 短链：只取 302 Location 拿类型+id，改请求无风控参数的干净分享页
+        kind, aweme_id = _resolve_short_link(session, fetch_url)
+        fetch_url = f"https://www.iesdouyin.com/share/{kind}/{aweme_id}/"
     page_url, html = resolve_share_page(session, fetch_url)
     return parse_share_page_html(html, page_url, share_url)
 
@@ -407,6 +453,14 @@ def _build_result(
 class DouyinDownloader(Downloader):
     def __init__(self, cookie=None):
         super().__init__()
+        # 显式传入的 cookie 优先；否则自动读「下载配置 → 抖音」里的 Cookie。
+        self._cookie = cookie or ""
+        if not self._cookie:
+            try:
+                self._cookie = CookieConfigManager().get("douyin") or ""
+            except Exception:
+                self._cookie = ""
+        self._has_cookie = bool(self._cookie)
 
     def extract_video_id(self, url: str) -> str:
         try:
@@ -416,7 +470,7 @@ class DouyinDownloader(Downloader):
 
     def _resolve_meta(self, video_url: str) -> DouyinContentMeta:
         try:
-            return resolve_douyin_share(video_url)
+            return resolve_douyin_share(video_url, cookie=self._cookie)
         except DouyinResolveError:
             raise
         except Exception as exc:

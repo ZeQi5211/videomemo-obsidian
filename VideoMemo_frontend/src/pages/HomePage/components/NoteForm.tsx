@@ -208,7 +208,7 @@ const NoteForm = ({ onSubmitted }: { onSubmitted?: () => void } = {}) => {
     }
   }, [downloadMode, platform, form])
 
-  // 双引擎模式：拉取引擎就绪状态（lux / yt-dlp）
+  // 引擎模式：拉取引擎就绪状态（yt-dlp）
   useEffect(() => {
     if (downloadMode !== 'engine') return
     getDownloadModeConfig()
@@ -359,8 +359,8 @@ const NoteForm = ({ onSubmitted }: { onSubmitted?: () => void } = {}) => {
           {/* 顶部按钮 */}
           <FormButton></FormButton>
 
-          {/* 下载模式：智能 Cookie / 双引擎 / 本地视频 */}
-          <SectionHeader title="下载模式" tip="选择视频的获取方式：站点 Cookie 下载、yt-dlp+lux 双引擎、或本地视频直接转写" />
+          {/* 下载模式：智能 Cookie / 引擎下载 / 本地视频 */}
+          <SectionHeader title="下载模式" tip="选择视频的获取方式：站点 Cookie 下载、yt-dlp 引擎下载、或本地视频直接转写" />
           <FormField
             control={form.control}
             name="download_mode"
@@ -391,16 +391,10 @@ const NoteForm = ({ onSubmitted }: { onSubmitted?: () => void } = {}) => {
             )}
           />
 
-          {/* 双引擎模式：引擎状态 */}
+          {/* 引擎模式：引擎状态 */}
           {downloadMode === 'engine' && (
             <div className="rounded-md border border-amber-100 bg-amber-50 p-2 text-xs leading-relaxed text-amber-700">
-              引擎状态：lux{' '}
-              {engineConfig?.lux_installed ? (
-                <b className="text-emerald-600">✓ 已就绪</b>
-              ) : (
-                <span className="text-amber-600">未安装（B站/抖音等国内站将自动回退 yt-dlp）</span>
-              )}{' '}
-              · yt-dlp{' '}
+              yt-dlp{' '}
               {engineConfig?.ytdlp_exe_installed ? (
                 <b className="text-emerald-600">✓ 已就绪</b>
               ) : (
@@ -415,7 +409,7 @@ const NoteForm = ({ onSubmitted }: { onSubmitted?: () => void } = {}) => {
           {/* 视频链接 & 平台 */}
           <SectionHeader title="视频链接" tip="支持 B 站、YouTube 等平台" />
           <div className="flex gap-2">
-            {/* 平台选择：仅智能 Cookie 模式需要（双引擎按 URL 域名路由引擎；本地视频由系统锁定） */}
+            {/* 平台选择：仅智能 Cookie 模式需要（引擎模式按 URL 自动识别；本地视频由系统锁定） */}
             {downloadMode === 'cookie' && (
             <FormField
               control={form.control}
@@ -474,7 +468,7 @@ const NoteForm = ({ onSubmitted }: { onSubmitted?: () => void } = {}) => {
                 </FormItem>
               )}
             />
-            {/* 双引擎模式：视频清晰度 */}
+            {/* 引擎模式：视频清晰度 */}
             {downloadMode === 'engine' && (
               <FormField
                 control={form.control}

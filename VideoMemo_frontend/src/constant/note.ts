@@ -49,9 +49,9 @@ export const downloadModes = [
     desc: '原平台下载器，可配站点 Cookie',
   },
   {
-    label: '双引擎下载',
+    label: '引擎下载',
     value: 'engine',
-    desc: 'yt-dlp + lux，融合 VideoDownloader',
+    desc: 'yt-dlp 引擎，可选清晰度',
   },
   {
     label: '本地视频',

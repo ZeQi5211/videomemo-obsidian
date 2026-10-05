@@ -35,11 +35,61 @@ class BrowserCookieError(Exception):
     pass
 
 
+def _quark_profile_path() -> Optional[str]:
+    """定位夸克浏览器的 Chromium profile（AppData\\Local\\Quark\\User Data\\<profile>）。"""
+    import json
+    import os
+
+    ud = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Quark", "User Data")
+    if not os.path.isdir(ud):
+        return None
+    # 优先 Local State 记录的最近使用 profile，其次 Default
+    last = None
+    try:
+        with open(os.path.join(ud, "Local State"), "r", encoding="utf-8") as f:
+            last = json.load(f).get("profile", {}).get("last_used")
+    except Exception:
+        last = None
+    for name in (last, "Default"):
+        if name and os.path.isdir(os.path.join(ud, name)):
+            return os.path.join(ud, name)
+    return None
+
+
+def _is_quark_running() -> bool:
+    """夸克运行时以独占锁锁定 Cookie 数据库，复制/直连均失败，需先退出。"""
+    try:
+        r = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq quark.exe", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return "quark.exe" in (r.stdout or "")
+    except Exception:
+        return False
+
+
 def _extract_cookies_from_browser(browser: str):
     try:
         from yt_dlp.cookies import extract_cookies_from_browser
     except Exception as exc:
         raise BrowserCookieError("当前后端环境缺少 yt-dlp，无法从浏览器读取 Cookie") from exc
+    if browser == "quark":
+        # 夸克不在 yt-dlp 官方列表，但它是 Chromium 内核且用传统 v10/DPAPI 加密，
+        # 用 chrome 提取器 + 指定 profile 路径即可读取
+        if _is_quark_running():
+            raise BrowserCookieError(
+                "夸克浏览器正在运行，Cookie 数据库被锁定，读取失败。"
+                "请先完全退出夸克（含右下角托盘），再点击一键获取。"
+            )
+        profile = _quark_profile_path()
+        if not profile:
+            raise BrowserCookieError(
+                "未找到夸克浏览器用户数据目录（AppData\\Local\\Quark\\User Data）"
+            )
+        try:
+            return extract_cookies_from_browser("chrome", profile=profile)
+        except Exception as exc:
+            raise BrowserCookieError(f"读取夸克 Cookie 失败：{exc}") from exc
     return extract_cookies_from_browser(browser)
 
 

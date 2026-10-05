@@ -1,4 +1,4 @@
-"""下载引擎配置管理：lux / yt-dlp.exe 所在目录（融合 VideoDownloader 的下载引擎）。
+"""下载引擎配置管理：yt-dlp.exe 所在目录（融合 VideoDownloader 的下载引擎）。
 
 持久化在数据库 app_config 表（key="download_engine"）。未手动配置时自动探测
 VideoDownloader（从 SmartSub 提取的独立下载模块）的 bin 目录，有引擎直接复用。
@@ -48,7 +48,7 @@ class EngineConfigManager:
         return self.detect()
 
     def detect(self) -> Dict[str, Any]:
-        """引擎就绪状态：lux.exe / yt-dlp.exe 是否可用。"""
+        """引擎就绪状态：yt-dlp.exe 是否可用（内置 Python 包恒兜底）。"""
         engine_dir = self.get_engine_dir()
 
         def has(name: str) -> bool:
@@ -57,7 +57,6 @@ class EngineConfigManager:
         return {
             "engine_dir": engine_dir,
             "default_dir": self.default_dir(),
-            "lux_installed": has("lux.exe"),
             "ytdlp_exe_installed": has("yt-dlp.exe"),
             # VideoMemo 自带 Python yt-dlp 包，永远可作兜底
             "ytdlp_python": True,

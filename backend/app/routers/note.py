@@ -57,11 +57,11 @@ class VideoRequest(BaseModel):
     # 跳过 download_subtitles 和音频转写。形如：
     #   {"language": "zh", "full_text": "...", "segments": [{"start","end","text"}, ...]}
     prefetched_transcript: Optional[dict] = None
-    # 下载模式：cookie=原平台下载器（默认）；engine=双引擎下载（yt-dlp+lux）；local=本地视频
+    # 下载模式：cookie=原平台下载器（默认）；engine=引擎下载（yt-dlp）；local=本地视频
     download_mode: Optional[str] = "cookie"
     # engine 模式下载视频的清晰度：audio/best/1080p/720p/480p/360p
     video_quality: Optional[str] = "audio"
-    # engine 模式选择走哪条引擎通道：ytdlp（默认）/ lux
+    # 兼容旧请求体保留（曾为 ytdlp/lux 二选一，lux 已移除，后端忽略该值）
     engine_choice: Optional[str] = "ytdlp"
 
     @field_validator("video_url")

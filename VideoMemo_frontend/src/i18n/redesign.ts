@@ -10,15 +10,6 @@ export const VM_STRINGS: Dict = {
   },
   videoSource: { zh: '视频来源', en: 'Video source' },
   downloadMode: { zh: '下载方式', en: 'Download method' },
-  engineChannel: { zh: '引擎通道', en: 'Engine channel' },
-  engineDescYtdlp: {
-    zh: 'yt-dlp：开源视频下载器，支持上千个网站，更新频繁、兼容性好',
-    en: 'yt-dlp: open-source downloader for 1000+ sites, frequently updated',
-  },
-  engineDescLux: {
-    zh: 'lux：Go 编写的轻量下载器，对国内主流视频站支持好、速度快',
-    en: 'lux: lightweight Go downloader, great support for Chinese video sites',
-  },
   videoQuality: { zh: '视频清晰度', en: 'Video quality' },
   audioOnly: { zh: '仅音频', en: 'Audio only' },
   /* ---- 微信视频号下载（wx_channels_download 集成） ---- */

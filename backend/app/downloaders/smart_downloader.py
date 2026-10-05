@@ -1,13 +1,14 @@
-"""双引擎智能下载器：融合 VideoDownloader（yt-dlp + lux）的下载能力。
+"""yt-dlp 智能下载器（原双引擎版已移除 lux）。
 
-按站点自动路由下载引擎：
-- lux（国内站：B站 / 抖音 / 小红书 / 微博）→ 优先 lux.exe 下载视频
-- yt-dlp（YouTube / X / Instagram / TikTok 等）→ yt-dlp.exe，无则用 Python yt-dlp 包
-  （音频提取统一走 yt-dlp 并转 mp3）
+统一走 yt-dlp（exe 优先，无则用内置 Python 包）：
+- 国内站：B站 / 小红书 / 微博 等 yt-dlp 支持站
+- 国外站：YouTube / X / Instagram / TikTok
+- 抖音：不走引擎，委托专用 DouyinDownloader（分享页解析 + Cookie）
+- 快手 / 小红书：yt-dlp 不支持，走各自专用下载器（cookie 模式）
 
 输出统一命名到 data/data：
 - 音频：{video_id}.mp3
-- 视频：{video_id}.mp4（或 lux 输出的源扩展名）
+- 视频：{video_id}.mp4（或 yt-dlp 输出的源扩展名）
 与转写、笔记生成、中间产物资产管理完全兼容。
 
 字幕/元信息委托给原平台下载器（如 B 站官方字幕 player API）。
@@ -28,14 +29,7 @@ from app.services.engine_config_manager import EngineConfigManager
 from app.utils.path_helper import get_data_dir
 from app.utils.url_parser import extract_video_id
 
-# 站点 → 引擎路由（与 VideoDownloader 保持一致）
-LUX_DOMAINS = ["bilibili.com", "b23.tv", "douyin.com", "xiaohongshu.com",
-               "xhslink.com", "weibo.com", "weibo.cn"]
-YT_DLP_DOMAINS = ["youtube.com", "youtu.be", "twitter.com", "x.com",
-                  "instagram.com", "tiktok.com"]
-
-# 清晰度映射（yt-dlp: -f 表达式）。注意：lux 没有 -q 质量档位，
-# 也不按高度筛选流，只能选流 ID/序号；默认不传 -f 即下载最佳质量流。
+# 清晰度映射（yt-dlp: -f 表达式）
 YTDLP_QUALITY_FMT = {
     "audio": "bestaudio/best",
     "best": "bestvideo+bestaudio/best",
@@ -57,11 +51,10 @@ def _proxy_for_ytdlp() -> Optional[str]:
 
 
 class SmartDownloader(Downloader):
-    """yt-dlp + lux 双引擎下载器（下载模式：engine）。
+    """yt-dlp 单引擎下载器（下载模式：engine）。
 
-    engine_choice 决定走哪条引擎通道：
-    - ytdlp（默认）：音频/视频都走 yt-dlp（exe 优先，内置 Python 包兜底）
-    - lux：音频/视频都走 lux.exe（未安装直接报错，不自动切换）
+    engine_choice 参数保留仅为兼容旧请求体（曾经 ytdlp/lux 二选一），
+    lux 已移除，任何取值都走 yt-dlp 通道。
     """
 
     def __init__(self, platform: str = "", video_quality: str = "audio",
@@ -72,7 +65,7 @@ class SmartDownloader(Downloader):
         self.engine_choice = engine_choice or "ytdlp"
         self._inner = None
 
-    # ---------------- 引擎与路由 ----------------
+    # ---------------- 引擎 ----------------
     def _engine_path(self, name: str) -> Optional[str]:
         d = EngineConfigManager().get_engine_dir()
         if not d:
@@ -80,8 +73,13 @@ class SmartDownloader(Downloader):
         p = Path(d) / name
         return str(p) if p.is_file() else None
 
-    def _use_lux(self, url: str) -> bool:
-        return any(dom in url for dom in LUX_DOMAINS)
+    def _is_douyin(self, url: str) -> bool:
+        """抖音不走 yt-dlp（提取器已失效），统一委托专用 DouyinDownloader（分享页解析 + Cookie）。"""
+        return "douyin.com" in url or self.platform == "douyin"
+
+    def _douyin_downloader(self):
+        from app.downloaders.douyin_downloader import DouyinDownloader
+        return DouyinDownloader()
 
     def _video_id_from_info(self, info: dict, url: str) -> str:
         vid = info.get("id") or extract_video_id(url, self.platform)
@@ -145,55 +143,14 @@ class SmartDownloader(Downloader):
     # ---------------- 下载实现 ----------------
     def _download_audio(self, url: str, out_dir: str, video_id: str,
                         info: Optional[dict] = None) -> str:
-        """下载音频并转 mp3，返回路径。按 engine_choice 走对应引擎通道。"""
+        """下载音频并转 mp3，返回路径。统一走 yt-dlp 通道。"""
         target = os.path.join(out_dir, f"{video_id}.mp3")
         if os.path.exists(target):
             return target
-        if self.engine_choice == "lux":
-            lux = self._engine_path("lux.exe")
-            if not lux:
-                raise RuntimeError("lux 引擎未安装，无法使用 lux 通道下载音频，请先安装 lux")
-            path = self._audio_via_lux(url, lux, out_dir, video_id)
-            # lux 无字幕能力，用 yt-dlp 单独补拉官方字幕（失败不影响下载）
-            self._try_download_subtitles(url, out_dir, video_id, info or {})
-            return path
-        # ytdlp 通道
         exe = self._engine_path("yt-dlp.exe")
         if exe:
             return self._audio_via_ytdlp_exe(url, exe, out_dir, video_id, info)
         return self._audio_via_ytdlp_python(url, out_dir, video_id, info)
-
-    _AUDIO_EXTS = {".m4a", ".mp3", ".aac", ".webm", ".opus", ".wav", ".flac"}
-
-    def _audio_via_lux(self, url: str, lux: str, out_dir: str, video_id: str) -> str:
-        """lux 下载视频（默认最佳流），再用 ffmpeg 提取音频转 mp3。
-
-        为什么不用 lux 的 --audio-only：
-          - 旧代码传 `-a`（lux 不支持的参数）直接报 flag 错误；
-          - --audio-only 只对存在独立音频流的站点有效，部分 B 站视频只有
-            音视频合流，会报 "No audio stream found"。
-        统一走「lux 下载 + ffmpeg 抽音转 mp3」对两种视频都成立。
-        """
-        cmd = [lux, "-o", out_dir, url]
-        before = {p.name for p in Path(out_dir).iterdir() if p.is_file()}
-        self._run(cmd)
-        newest = None
-        for p in Path(out_dir).iterdir():
-            if p.is_file() and p.name not in before and p.suffix.lower() in (self._AUDIO_EXTS | _VIDEO_EXTS):
-                if newest is None or p.stat().st_mtime > newest.stat().st_mtime:
-                    newest = p
-        if newest is None:
-            raise RuntimeError("lux 下载完成但未找到输出文件")
-        if newest.suffix.lower() in self._AUDIO_EXTS and newest.suffix.lower() == ".mp3":
-            target = newest.with_name(f"{video_id}.mp3")
-            if target != newest:
-                newest.replace(target)
-            return str(target)
-        target = os.path.join(out_dir, f"{video_id}.mp3")
-        self._run(["ffmpeg", "-y", "-i", str(newest),
-                   "-codec:a", "libmp3lame", "-qscale:a", "5", target])
-        newest.unlink(missing_ok=True)
-        return target
 
     def _base_ytdlp_args(self, url: str, out_dir: str, video_id: str) -> list:
         args = ["--newline", "--no-warnings", "--noplaylist",
@@ -249,34 +206,6 @@ class SmartDownloader(Downloader):
         }
         return opts
 
-    def _try_download_subtitles(self, url: str, out_dir: str, video_id: str, info: dict):
-        """lux 通道的补充：lux 本身不支持字幕，用 yt-dlp 单独拉官方字幕并转 srt。
-        失败仅记日志，绝不影响主下载流程。"""
-        try:
-            langs, is_auto = self._pick_sub_langs(info or {})
-            if not langs:
-                self._log(f"未检测到可用字幕: {url}")
-                return
-            opts = {
-                "skip_download": True,
-                "noplaylist": True,
-                "quiet": True,
-                "no_warnings": True,
-                "outtmpl": os.path.join(out_dir, "%(id)s.%(ext)s"),
-                "writesubtitles": not is_auto,
-                "writeautomaticsub": is_auto,
-                "subtitleslangs": langs,
-                "postprocessors": [{"key": "FFmpegSubtitlesConvertor", "format": "srt"}],
-            }
-            proxy = _proxy_for_ytdlp()
-            if proxy:
-                opts["proxy"] = proxy
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.extract_info(url, download=True)
-            self._log(f"已下载字幕 {','.join(langs)}{'（自动字幕）' if is_auto else '（官方字幕）'}: {url}")
-        except Exception as e:
-            self._log(f"补充下载字幕失败（不影响主下载）: {e}")
-
     def _audio_via_ytdlp_exe(self, url: str, exe: str, out_dir: str, video_id: str,
                              info: Optional[dict] = None) -> str:
         cmd = [exe, "-x", "--audio-format", "mp3", "--audio-quality", "5"]
@@ -316,48 +245,28 @@ class SmartDownloader(Downloader):
 
     def _download_video(self, url: str, out_dir: str, video_id: str,
                         info: Optional[dict] = None) -> str:
-        """下载视频。按 engine_choice 走对应引擎通道；通道引擎缺失直接报错。"""
+        """下载视频。统一走 yt-dlp 通道。"""
         # 已存在（mp4 或任意视频扩展名）直接复用
         for p in Path(out_dir).glob(f"{video_id}.*"):
             if p.is_file() and p.suffix.lower() in _VIDEO_EXTS:
                 return str(p)
-
-        if self.engine_choice == "lux":
-            lux = self._engine_path("lux.exe")
-            if not lux:
-                raise RuntimeError("lux 引擎未安装，无法使用 lux 通道下载视频，请先安装 lux")
-            path = self._video_via_lux(url, lux, out_dir, video_id)
-            # lux 无字幕能力，用 yt-dlp 单独补拉官方字幕（失败不影响下载）
-            self._try_download_subtitles(url, out_dir, video_id, info or {})
-            return path
 
         exe = self._engine_path("yt-dlp.exe")
         if exe:
             return self._video_via_ytdlp_exe(url, exe, out_dir, video_id, info)
         return self._video_via_ytdlp_python(url, out_dir, video_id, info)
 
-    def _video_via_lux(self, url: str, lux: str, out_dir: str, video_id: str) -> str:
-        # lux 没有 -q 质量档位（旧代码传 -q 导致 "flag provided but not defined: -q"），
-        # 也不支持按高度筛选；不传 -f 时 lux 默认下载最佳质量流。
-        cmd = [lux, "-o", out_dir, url]
-        # 记录下载前目录快照，用于识别 lux 新生成的文件
-        before = {p.name for p in Path(out_dir).iterdir() if p.is_file()}
-        self._run(cmd)
-        newest = None
-        for p in Path(out_dir).iterdir():
-            if p.is_file() and p.name not in before and p.suffix.lower() in _VIDEO_EXTS:
-                if newest is None or p.stat().st_mtime > newest.stat().st_mtime:
-                    newest = p
-        if newest is None:
-            raise RuntimeError("lux 下载完成但未找到输出文件")
-        target = newest.with_name(f"{video_id}{newest.suffix.lower()}")
-        if target != newest:
-            newest.replace(target)
-        return str(target)
+    def _video_fmt(self) -> str:
+        """视频下载的格式表达式。video_quality=audio 语义是「仅音频」，
+        与视频下载互斥——此时按 best 下载视频，避免下出音频却找 mp4。"""
+        q = self.video_quality
+        if q == "audio":
+            q = "best"
+        return YTDLP_QUALITY_FMT.get(q, YTDLP_QUALITY_FMT["best"])
 
     def _video_via_ytdlp_exe(self, url: str, exe: str, out_dir: str, video_id: str,
                              info: Optional[dict] = None) -> str:
-        fmt = YTDLP_QUALITY_FMT.get(self.video_quality, YTDLP_QUALITY_FMT["best"])
+        fmt = self._video_fmt()
         cmd = [exe, "-f", fmt, "--merge-output-format", "mp4", "--fragment-retries", "3", "--continue"]
         cmd += self._subtitle_exe_args(info or {})
         cmd += self._base_ytdlp_args(url, out_dir, video_id)
@@ -370,7 +279,7 @@ class SmartDownloader(Downloader):
 
     def _video_via_ytdlp_python(self, url: str, out_dir: str, video_id: str,
                                 info: Optional[dict] = None) -> str:
-        fmt = YTDLP_QUALITY_FMT.get(self.video_quality, YTDLP_QUALITY_FMT["best"])
+        fmt = self._video_fmt()
         opts = {
             "format": fmt,
             "outtmpl": os.path.join(out_dir, "%(id)s.%(ext)s"),
@@ -434,6 +343,11 @@ class SmartDownloader(Downloader):
             output_dir = get_data_dir()
         os.makedirs(output_dir, exist_ok=True)
 
+        if self._is_douyin(video_url):
+            self._log("抖音 URL 委托 DouyinDownloader（分享页解析 + Cookie）")
+            return self._douyin_downloader().download(
+                video_url, output_dir, quality, need_video, skip_download)
+
         info = self._probe_metadata(video_url)
         if skip_download:
             return self._make_result(info, "", video_url)
@@ -448,6 +362,10 @@ class SmartDownloader(Downloader):
         if output_dir is None:
             output_dir = get_data_dir()
         os.makedirs(output_dir, exist_ok=True)
+
+        if self._is_douyin(video_url):
+            self._log("抖音 URL 委托 DouyinDownloader（分享页解析 + Cookie）")
+            return self._douyin_downloader().download_video(video_url, output_dir)
 
         info = self._probe_metadata(video_url)
         video_id = self._video_id_from_info(info, video_url)

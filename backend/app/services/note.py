@@ -466,14 +466,14 @@ class NoteGenerator:
         根据平台名称与下载模式获取对应的下载器实例
 
         :param platform: 平台标识，需在 SUPPORT_PLATFORM_MAP 中
-        :param download_mode: cookie=原平台下载器（默认）；engine=双引擎下载（yt-dlp+lux）；local=本地视频
+        :param download_mode: cookie=原平台下载器（默认）；engine=引擎下载（yt-dlp）；local=本地视频
         :param video_quality: engine 模式下下载视频的清晰度（audio/best/1080p/720p/480p/360p）
-        :param engine_choice: engine 模式选择走哪条引擎通道（ytdlp/lux）
+        :param engine_choice: 兼容旧参数保留（曾为 ytdlp/lux 二选一，lux 已移除，忽略该值）
         :return: 对应的 Downloader 子类实例
         """
         if download_mode == "engine":
             from app.downloaders.smart_downloader import SmartDownloader
-            logger.info(f"使用双引擎下载器（engine 模式, platform={platform}, quality={video_quality}, channel={engine_choice}）")
+            logger.info(f"使用引擎下载器（engine 模式, platform={platform}, quality={video_quality}）")
             return SmartDownloader(platform=platform, video_quality=video_quality,
                                    engine_choice=engine_choice)
 

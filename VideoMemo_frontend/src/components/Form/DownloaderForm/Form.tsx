@@ -29,12 +29,13 @@ import {
 import { useParams } from 'react-router-dom'
 import { COOKIE_OPTIONAL_PLATFORMS, videoPlatforms } from '@/constant/note.ts'
 
-// yt-dlp 支持的浏览器列表（cookiesfrombrowser）
+// yt-dlp 支持的浏览器列表（cookiesfrombrowser），按推荐度排序 + 使用注释
 const BROWSER_OPTIONS = [
   { value: 'none', label: '不使用（用上方 Cookie 字符串）' },
-  { value: 'chrome', label: 'Chrome' },
-  { value: 'edge', label: 'Edge' },
-  { value: 'firefox', label: 'Firefox' },
+  { value: 'quark', label: '夸克', desc: '读取前需完全退出夸克（运行时会锁库）' },
+  { value: 'firefox', label: 'Firefox', desc: '可稳定读取（不受 Chrome 加密锁影响）' },
+  { value: 'chrome', label: 'Chrome', desc: '新版 127+ 加密保护，可能读取失败，失败请手动复制 Cookie' },
+  { value: 'edge', label: 'Edge', desc: '需已安装且数据目录为标准路径' },
   { value: 'safari', label: 'Safari' },
   { value: 'brave', label: 'Brave' },
   { value: 'chromium', label: 'Chromium' },
@@ -52,8 +53,9 @@ const CookieSchema = z.object({
 // 各平台 Cookie 获取说明（显示在 Cookie 输入框下方）
 const COOKIE_TIPS: Record<string, string> = {
   douyin:
-    '抖音现在优先解析移动端分享页公开数据，通常不需要 Cookie。' +
-    '可直接粘贴 v.douyin.com 短链、www.douyin.com/video|note 链接，或整段分享文案。',
+    '抖音 2025 年起需要浏览器 Cookie（不要求登录）：用 Chrome 访问 douyin.com 后，' +
+    '从开发者工具（F12 → Application → Cookies）复制完整 Cookie 粘贴于此，否则分享页解析会被拦截。' +
+    '链接可直接粘贴 v.douyin.com 短链、www.douyin.com/video|note 链接，或整段分享文案。',
   youtube:
     'YouTube 公开视频通常不需要 Cookie；遇到年龄限制、会员、登录校验或机器人校验时，' +
     '再选择浏览器读取 Cookie 或手动粘贴即可。',
@@ -199,7 +201,10 @@ const DownloaderForm = () => {
                       <SelectContent>
                         {BROWSER_OPTIONS.map(o => (
                           <SelectItem key={o.value} value={o.value}>
-                            {o.label}
+                            <div className="flex flex-col">
+                              <span>{o.label}</span>
+                              {o.desc && <span className="text-xs text-gray-400">{o.desc}</span>}
+                            </div>
                           </SelectItem>
                         ))}
                       </SelectContent>

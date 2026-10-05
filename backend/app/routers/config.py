@@ -100,14 +100,14 @@ def sync_cookie_from_browser(data: BrowserCookieSyncRequest):
         return R.error(msg=str(exc))
 
 
-# ---- 下载模式：双引擎（yt-dlp + lux，融合 VideoDownloader）配置 ----
+# ---- 下载模式：引擎（yt-dlp）配置 ----
 
 class EngineDirRequest(BaseModel):
     engine_dir: str
 
 
 class EngineInstallRequest(BaseModel):
-    engine: str  # 'lux' | 'ytdlp'
+    engine: str  # 仅支持 'ytdlp'
 
 
 @router.get("/download_mode_config")
@@ -122,19 +122,13 @@ def update_download_mode_config(data: EngineDirRequest):
     return R.success(data=EngineConfigManager().set_engine_dir(data.engine_dir))
 
 
-# 引擎下载定义：官方 Release 地址 + 落盘文件名 + 是否 zip 压缩包
-# lux 官方资产是 zip（lux_0.24.1_Windows_x86_64.zip，解压出 lux.exe），
-# 裸 lux.exe 的地址会 404；yt-dlp 资产即 yt-dlp.exe 本体。
+# 引擎下载定义：官方 Release 地址 + 落盘文件名
+# （lux 已移除，仅保留 yt-dlp）
 _ENGINE_DOWNLOADS = {
     "ytdlp": {
         "url": "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe",
         "filename": "yt-dlp.exe",
         "unzip": False,
-    },
-    "lux": {
-        "url": "https://github.com/iawia002/lux/releases/download/v0.24.1/lux_0.24.1_Windows_x86_64.zip",
-        "filename": "lux.exe",
-        "unzip": True,
     },
 }
 # GitHub 加速镜像前缀：直连失败时按序切换，直到下载成功（发布给外部用户使用，需尽量保证可用）
@@ -146,7 +140,7 @@ _GITHUB_MIRROR_PREFIXES = [
     "https://gh.ddlc.top/",    # 4. ddlc 加速
     "https://github.moeyy.xyz/",  # 5. moeyy 加速
 ]
-# lux.exe / yt-dlp.exe 的最小合理大小（低于此值视为镜像返回了错误页/占位内容）
+# yt-dlp.exe 的最小合理大小（低于此值视为镜像返回了错误页/占位内容）
 _ENGINE_MIN_BYTES = 1024 * 1024
 
 
@@ -190,7 +184,7 @@ def _resolve_proxy_candidates() -> list:
 
 
 def _install_engine_task(engine: str):
-    """后台下载 yt-dlp.exe / lux.exe 到引擎目录。
+    """后台下载 yt-dlp.exe 到引擎目录。
 
     多通道自动切换，确保发布给外部用户时尽量一次成功：
     1. 代理通道：VideoMemo 已配置代理 / Windows 系统代理（Clash 等）
@@ -239,19 +233,7 @@ def _install_engine_task(engine: str):
                             size += len(chunk)
                 if size < _ENGINE_MIN_BYTES:
                     raise RuntimeError(f"下载内容过小（{size} bytes），疑似镜像错误页")
-                if info["unzip"]:
-                    # lux 资产是 zip：解压出内部 .exe 落盘为 lux.exe
-                    import zipfile
-                    with zipfile.ZipFile(tmp) as zf:
-                        exe_names = [n for n in zf.namelist() if n.lower().endswith(".exe")]
-                        if not exe_names:
-                            raise RuntimeError("压缩包内未找到 .exe 文件")
-                        with zf.open(exe_names[0]) as src, open(target, "wb") as dst:
-                            import shutil
-                            shutil.copyfileobj(src, dst)
-                    os.remove(tmp)
-                else:
-                    os.replace(tmp, target)
+                os.replace(tmp, target)
                 logger.info(f"引擎安装完成: {target}（{size} bytes，来源 {url}）")
                 return
             except Exception as e:
@@ -268,8 +250,8 @@ def _install_engine_task(engine: str):
 
 @router.post("/download_mode_install")
 def install_download_engine(data: EngineInstallRequest, background_tasks: BackgroundTasks):
-    if data.engine not in ("lux", "ytdlp"):
-        return R.error(msg="engine 必须是 lux 或 ytdlp")
+    if data.engine != "ytdlp":
+        return R.error(msg="engine 仅支持 ytdlp（lux 已移除）")
     background_tasks.add_task(_install_engine_task, data.engine)
     return R.success(msg="已开始安装，稍后刷新查看状态")
 

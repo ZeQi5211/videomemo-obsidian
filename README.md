@@ -1,6 +1,6 @@
 <div align="center">
   <img src="./doc/icon.svg" alt="VideoMemo Logo" width="64" height="64" />
-  <h1>VideoMemo v2.3.5</h1>
+  <h1>VideoMemo v2.3.8</h1>
   <p><i>把视频变成结构化的 AI 笔记 —— 一个开源、可扩展、可桌面化的视频备忘工具</i></p>
 
   <p>
